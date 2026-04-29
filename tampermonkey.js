@@ -1,10 +1,12 @@
 // ==UserScript==
 // @name         Post Extractor 3000
 // @namespace    http://tampermonkey.net/
-// @version      6.0
-// @description  Extract Instagram posts via DOM scraping
+// @version      7.0
+// @description  Extract Instagram posts with dates
 // @match        https://www.instagram.com/*
 // @grant        GM_xmlhttpRequest
+// @grant        GM_setValue
+// @grant        GM_getValue
 // @connect      localhost
 // @run-at       document-start
 // ==/UserScript==
@@ -13,10 +15,9 @@
     'use strict';
 
     const API_SERVER = 'http://localhost:5003';
-    const processedShortcodes = new Set();
     let isExtracting = false;
-    let stopShortcode = null;
-    let postCount = 0;
+    let stopDate = null;
+    let collectedPosts = new Map(); // shortcode -> {shortcode, date, image_url}
     let scrollInterval = null;
 
     function log(msg, level = 'info') {
@@ -24,174 +25,190 @@
         console.log(`%c[PE3000] ${msg}`, styles[level] || styles.info);
     }
 
-    // ─── Send to Server ───────────────────────────────────────────────
+    // ─── Get post date from embed page ────────────────────────────────
 
-    function sendToServer(endpoint, data) {
-        GM_xmlhttpRequest({
-            method: 'POST',
-            url: `${API_SERVER}${endpoint}`,
-            headers: { 'Content-Type': 'application/json' },
-            data: JSON.stringify(data),
-            onload: function(resp) {
-                if (resp.status === 200) {
-                    postCount++;
-                    updateUI();
-                    log(`Saved: ${data.shortcode} (${postCount})`, 'ok');
+    function getPostDate(shortcode) {
+        return new Promise((resolve) => {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: `https://www.instagram.com/p/${shortcode}/embed/`,
+                onload: function(resp) {
+                    if (resp.status !== 200) {
+                        resolve(null);
+                        return;
+                    }
+
+                    const html = resp.responseText;
+
+                    // Look for timestamp in various formats
+                    let date = null;
+
+                    // Pattern 1: datetime attribute
+                    const timeMatch = html.match(/datetime="([^"]+)"/);
+                    if (timeMatch) {
+                        date = timeMatch[1].split('T')[0];
+                    }
+
+                    // Pattern 2: "January 1, 2025" format
+                    if (!date) {
+                        const monthNames = ['January', 'February', 'March', 'April', 'May', 'June',
+                                           'July', 'August', 'September', 'October', 'November', 'December'];
+                        const datePattern = new RegExp(`(${monthNames.join('|')})\\s+\\d{1,2},\\s+\\d{4}`);
+                        const match = html.match(datePattern);
+                        if (match) {
+                            const parsed = new Date(match[1]);
+                            if (!isNaN(parsed)) {
+                                date = parsed.toISOString().split('T')[0];
+                            }
+                        }
+                    }
+
+                    // Pattern 3: "Jan 1, 2025" format
+                    if (!date) {
+                        const shortMonths = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                                            'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+                        const datePattern = new RegExp(`(${shortMonths.join('|')})\\s+\\d{1,2},\\s+\\d{4}`);
+                        const match = html.match(datePattern);
+                        if (match) {
+                            const parsed = new Date(match[1]);
+                            if (!isNaN(parsed)) {
+                                date = parsed.toISOString().split('T')[0];
+                            }
+                        }
+                    }
+
+                    resolve(date);
+                },
+                onerror: function() {
+                    resolve(null);
                 }
-            },
-            onerror: function() {
-                log(`Failed: ${data.shortcode}`, 'err');
-            }
+            });
         });
     }
 
-    // ─── DOM Scraping (sorted top-to-bottom) ──────────────────────────
+    // ─── Extract post links from DOM ──────────────────────────────────
 
-    function extractFromDOM() {
-        // Find ALL post links, not just in main
-        const links = document.querySelectorAll('a[href*="/p/"], a[href*="/reel/"], a[href*="/tv/"]');
-        const results = [];
-        const seen = new Set();
+    function extractPostLinks() {
+        const links = document.querySelectorAll('a[href*="/p/"], a[href*="/reel/"]');
+        const found = [];
 
         links.forEach(link => {
-            // More flexible regex to match shortcodes
-            const match = link.href.match(/\/(?:p|reel|tv)\/([A-Za-z0-9_-]{5,})/);
-            if (!match || seen.has(match[1])) return;
-            seen.add(match[1]);
+            const match = link.href.match(/\/(?:p|reel)\/([A-Za-z0-9_-]{5,})/);
+            if (!match) return;
 
             const shortcode = match[1];
-            const rect = link.getBoundingClientRect();
+            if (collectedPosts.has(shortcode)) return;
 
-            // Skip header area
-            if (rect.top < -100) return;
+            const rect = link.getBoundingClientRect();
+            if (rect.top < -100) return; // skip header
 
             let imageUrl = '';
             const img = link.querySelector('img');
-            if (img) imageUrl = img.src || img.dataset.src || '';
+            if (img) imageUrl = img.src || '';
 
-            // Check for video/carousel indicators
-            const isReel = link.href.includes('/reel/') || link.href.includes('/tv/');
-            const hasCarouselIcon = link.querySelector('[aria-label*="Carousel"]') ||
-                                    link.querySelector('[aria-label*="carousel"]') ||
-                                    link.querySelector('.coreSpriteCarousel') ||
-                                    link.closest('article')?.querySelector('[aria-label*="Carousel"]');
+            const isReel = link.href.includes('/reel/');
 
-            results.push({
+            collectedPosts.set(shortcode, {
                 shortcode,
                 image_url: imageUrl,
                 is_video: isReel,
-                is_carousel: !!hasCarouselIcon,
+                date: null,
                 top: rect.top + window.scrollY
             });
+
+            found.push(shortcode);
         });
 
-        results.sort((a, b) => a.top - b.top);
-        return results;
+        return found;
     }
 
-    // ─── Process Posts (in order, stop at target) ─────────────────────
+    // ─── Send to server ───────────────────────────────────────────────
 
-    function processPosts(posts) {
-        // If stop shortcode exists, only process posts up to (and including) it
-        let postsToProcess = posts;
-        if (stopShortcode) {
-            const stopIndex = posts.findIndex(p => p.shortcode === stopShortcode);
-            if (stopIndex !== -1) {
-                postsToProcess = posts.slice(0, stopIndex + 1);
-            }
-        }
-
-        for (const post of postsToProcess) {
-            if (processedShortcodes.has(post.shortcode)) continue;
-
-            processedShortcodes.add(post.shortcode);
-            sendToServer('/api/shortcode', {
+    function sendToServer(post) {
+        GM_xmlhttpRequest({
+            method: 'POST',
+            url: `${API_SERVER}/api/shortcode`,
+            headers: { 'Content-Type': 'application/json' },
+            data: JSON.stringify({
                 shortcode: post.shortcode,
                 image_url: post.image_url,
                 is_video: post.is_video
+            }),
+            onload: function(resp) {
+                if (resp.status === 200) {
+                    updateUI();
+                    log(`Saved: ${post.shortcode} (${post.date || 'no date'})`, 'ok');
+                }
+            }
+        });
+    }
+
+    // ─── Process collected posts ──────────────────────────────────────
+
+    async function processCollectedPosts() {
+        const posts = Array.from(collectedPosts.values())
+            .filter(p => p.date === null) // only process posts without dates
+            .sort((a, b) => a.top - b.top); // top to bottom (newest first)
+
+        for (const post of posts) {
+            if (!isExtracting) break;
+
+            // Get date
+            const date = await getPostDate(post.shortcode);
+            post.date = date || 'unknown';
+
+            log(`${post.shortcode}: ${post.date}`, 'info');
+
+            // Check if we hit the stop date
+            if (stopDate && date) {
+                const postDate = new Date(date);
+                const cutoff = new Date(stopDate);
+                if (postDate < cutoff) {
+                    log(`Reached stop date: ${date} < ${stopDate}`, 'warn');
+                    log(`Saving posts collected so far...`, 'info');
+                    await saveAllPosts();
+                    isExtracting = false;
+                    if (scrollInterval) clearInterval(scrollInterval);
+                    updateButtons();
+                    return;
+                }
+            }
+
+            // Small delay between requests
+            await new Promise(r => setTimeout(r, 500));
+        }
+    }
+
+    // ─── Save all collected posts to server ───────────────────────────
+
+    async function saveAllPosts() {
+        const posts = Array.from(collectedPosts.values())
+            .filter(p => p.date !== null)
+            .sort((a, b) => {
+                if (!a.date || a.date === 'unknown') return 1;
+                if (!b.date || b.date === 'unknown') return -1;
+                return new Date(b.date) - new Date(a.date); // newest first
             });
 
-            // Stop after saving the target post
-            if (stopShortcode && post.shortcode === stopShortcode) {
-                log(`Reached stop post: ${stopShortcode}`, 'warn');
-                isExtracting = false;
-                if (scrollInterval) clearInterval(scrollInterval);
-                updateButtons();
-                return true;
-            }
-        }
-        return false;
-    }
-
-    // ─── Page Data Extraction ─────────────────────────────────────────
-
-    function extractFromPageData() {
-        const posts = [];
-
-        if (window._sharedData) {
-            walkForPosts(window._sharedData, posts);
-            if (posts.length > 0) return posts;
+        // Only save posts before the stop date
+        let toSave = posts;
+        if (stopDate) {
+            const cutoff = new Date(stopDate);
+            toSave = posts.filter(p => {
+                if (!p.date || p.date === 'unknown') return false;
+                return new Date(p.date) >= cutoff;
+            });
         }
 
-        for (const key of Object.keys(window)) {
-            if (key.startsWith('__additionalData') && window[key]) {
-                walkForPosts(window[key], posts);
-                if (posts.length > 0) return posts;
-            }
+        log(`Saving ${toSave.length} posts...`, 'ok');
+
+        for (const post of toSave) {
+            if (!isExtracting) break;
+            sendToServer(post);
+            await new Promise(r => setTimeout(r, 300));
         }
 
-        document.querySelectorAll('script[type="application/json"]').forEach(script => {
-            try {
-                walkForPosts(JSON.parse(script.textContent), posts);
-            } catch (e) {}
-        });
-
-        return posts;
-    }
-
-    function walkForPosts(obj, posts, depth = 0) {
-        if (!obj || typeof obj !== 'object' || depth > 25) return;
-
-        if (obj.shortcode || obj.code) {
-            const hasMedia = obj.image_versions2 || obj.video_versions || obj.display_url || obj.thumbnail_src || obj.caption;
-            if (hasMedia) {
-                posts.push(parseNode(obj));
-                return;
-            }
-        }
-
-        if (Array.isArray(obj.items)) obj.items.forEach(i => walkForPosts(i, posts, depth + 1));
-        if (Array.isArray(obj.edges)) obj.edges.forEach(e => { if (e.node) walkForPosts(e.node, posts, depth + 1); });
-        if (Array.isArray(obj)) obj.forEach(i => walkForPosts(i, posts, depth + 1));
-        else Object.values(obj).forEach(v => { if (typeof v === 'object') walkForPosts(v, posts, depth + 1); });
-    }
-
-    function parseNode(node) {
-        const shortcode = node.shortcode || node.code || '';
-
-        let caption = '';
-        if (node.edge_media_to_caption?.edges?.[0]?.node?.text) caption = node.edge_media_to_caption.edges[0].node.text;
-        else if (typeof node.caption === 'string') caption = node.caption;
-        else if (node.caption?.text) caption = node.caption.text;
-
-        let imageUrl = '';
-        if (node.image_versions2?.candidates?.[0]?.url) imageUrl = node.image_versions2.candidates[0].url;
-        else if (node.display_url) imageUrl = node.display_url;
-
-        let videoUrl = '';
-        if (node.video_versions?.[0]?.url) videoUrl = node.video_versions[0].url;
-        else if (node.video_url) videoUrl = node.video_url;
-
-        return {
-            shortcode,
-            post_id: String(node.pk || node.id || shortcode),
-            caption,
-            image_url: imageUrl,
-            video_url: videoUrl,
-            taken_at: node.taken_at || 0,
-            media_type: node.media_type || 1,
-            date: node.taken_at ? new Date(node.taken_at * 1000).toISOString().split('T')[0] : 'unknown'
-        };
+        log(`Done! Saved ${toSave.length} posts.`, 'ok');
     }
 
     // ─── UI ───────────────────────────────────────────────────────────
@@ -216,11 +233,14 @@
             </style>
             <div id="pe3000-card">
                 <h3>⛏ Post Extractor 3000</h3>
-                <label>Last post to grab (paste URL)</label>
-                <input type="text" id="pe3000-last" placeholder="https://instagram.com/p/ABC123/">
+                <label>Stop date (grab posts from newest to this date)</label>
+                <input type="date" id="pe3000-date" value="2025-12-16">
                 <button class="pe3000-start" id="pe3000-start">Start Extracting</button>
                 <button class="pe3000-stop" id="pe3000-stop" style="display:none">Stop</button>
-                <div class="pe3000-stats">Posts saved: <span id="pe3000-count">0</span></div>
+                <div class="pe3000-stats">
+                    Posts found: <span id="pe3000-found">0</span><br>
+                    Posts saved: <span id="pe3000-count">0</span>
+                </div>
             </div>
             <button id="pe3000-toggle">⛏</button>
         `;
@@ -234,8 +254,10 @@
     }
 
     function updateUI() {
-        const el = document.getElementById('pe3000-count');
-        if (el) el.textContent = postCount;
+        const foundEl = document.getElementById('pe3000-found');
+        const countEl = document.getElementById('pe3000-count');
+        if (foundEl) foundEl.textContent = collectedPosts.size;
+        if (countEl) countEl.textContent = collectedPosts.size;
     }
 
     function updateButtons() {
@@ -246,55 +268,48 @@
     // ─── Extract Logic ────────────────────────────────────────────────
 
     function startExtracting() {
-        // Parse stop shortcode
-        const lastUrl = document.getElementById('pe3000-last').value.trim();
-        stopShortcode = null;
-        if (lastUrl) {
-            const match = lastUrl.match(/\/(p|reel)\/([A-Za-z0-9_-]+)/);
-            if (match) {
-                stopShortcode = match[2];
-                log(`Will stop at: ${stopShortcode}`, 'info');
-            }
-        }
-
+        const dateVal = document.getElementById('pe3000-date').value;
+        stopDate = dateVal || null;
         isExtracting = true;
-        postCount = 0;
-        processedShortcodes.clear();
+        collectedPosts.clear();
         updateUI();
         updateButtons();
-        log('Started...', 'ok');
 
-        // First pass: extract from DOM (sorted top-to-bottom)
-        const domPosts = extractFromDOM();
-        log(`Found ${domPosts.length} posts on page`, 'info');
-        log(`Shortcodes: ${domPosts.map(p => p.shortcode).join(', ')}`, 'debug');
+        log(`Started. Stop date: ${stopDate || 'none'}`, 'ok');
 
-        if (processPosts(domPosts)) return; // stopped
+        // Phase 1: Scroll and collect links
+        log('Phase 1: Collecting post links...', 'info');
 
-        // Auto-scroll for more posts
         scrollInterval = setInterval(() => {
             if (!isExtracting) {
                 clearInterval(scrollInterval);
                 return;
             }
 
-            const newPosts = extractFromDOM();
-            const unseen = newPosts.filter(p => !processedShortcodes.has(p.shortcode));
+            const newLinks = extractPostLinks();
+            updateUI();
 
-            if (unseen.length > 0) {
-                log(`Found ${unseen.length} new posts`, 'info');
-                if (processPosts(unseen)) return; // stopped
+            // Check if we've reached the bottom
+            const atBottom = window.innerHeight + window.scrollY >= document.body.scrollHeight - 100;
+
+            if (newLinks.length === 0 && atBottom) {
+                log('Reached bottom. Starting date check...', 'info');
+                clearInterval(scrollInterval);
+
+                // Phase 2: Get dates for all posts
+                processCollectedPosts();
+                return;
             }
 
             window.scrollTo(0, document.body.scrollHeight);
-        }, 3000 + Math.random() * 2000);
+        }, 3000);
     }
 
     function stopExtracting() {
         isExtracting = false;
         if (scrollInterval) clearInterval(scrollInterval);
         updateButtons();
-        log(`Stopped. Total: ${postCount}`, 'warn');
+        log('Stopped.', 'warn');
     }
 
     // ─── Init ─────────────────────────────────────────────────────────
