@@ -4,40 +4,31 @@
 
 ## How to Run
 
-```bash
-cd post-extractor-3000
-python3 scraper.py
-```
-
 **First time setup:**
 ```bash
 cd post-extractor-3000
 pip install -r requirements.txt
-playwright install chromium
 ```
 
-**Before running:**
-- Edit config at top of `scraper.py`:
-  - `TARGET_PROFILE` — Instagram URL to scrape
-  - `STOP_DATE` — Stop when posts are older than this date (YYYY-MM-DD), or "" to disable
-- Make sure Chrome is open and logged into Instagram
+**1. Install Tampermonkey extension in Chrome:**
+https://chromewebstore.google.com/detail/tampermonkey/dhdgffkkebhmkfjojejmpbldmpobfkfo
 
----
+**2. Add the script to Tampermonkey:**
+- Open Tampermonkey dashboard
+- Click "+" to create new script
+- Paste contents of `tampermonkey.js`
+- Save (Ctrl+S)
 
-## Changelog
+**3. Start the local server:**
+```bash
+cd post-extractor-3000
+python3 server.py
+```
 
-**2026-04-28 — CDP Connection (no need to close Chrome)**
-- Switched from `launch_persistent_context` to `connect_over_cdp`
-- Connects to running Chrome via remote debugging port 9222
-- If Chrome is closed, script launches it with debugging enabled
-- No need to close Chrome before running
-
-**2026-04-28 — Initial Creation**
-- Created scraper.py with Playwright network interception
-- No DOM scraping — intercepts GraphQL/API responses
-- Human-like scrolling with random 2-5s delays
-- Downloads images, videos, and captions
-- Organized output in `post_[shortcode]` folders
+**4. Go to Instagram and click the ⛏ button (bottom right)**
+- Set stop date if needed
+- Click "Start Extracting"
+- Script auto-scrolls and captures posts
 
 ---
 
@@ -45,11 +36,14 @@ playwright install chromium
 
 ```
 post-extractor-3000/
-├── scraper.py           # Main script (config at top)
-├── requirements.txt     # Python dependencies
+├── tampermonkey.js       # Browser script (add to Tampermonkey)
+├── server.py             # Local server (port 5003)
+├── requirements.txt
 ├── .gitignore
-├── project-log.md       # This file
-└── ig_archive/          # Downloaded posts (gitignored)
+├── project-log.md
+├── data/
+│   └── posts.json        # Extracted post data
+└── ig_archive/           # Downloaded media (gitignored)
     └── post_[shortcode]/
         ├── post_[shortcode]_caption.txt
         ├── post_[shortcode]_thumbnail.jpg
@@ -57,54 +51,72 @@ post-extractor-3000/
         └── post_[shortcode]_meta.json
 ```
 
-**Config (top of scraper.py):**
-- `TARGET_PROFILE` — Instagram URL to scrape
-- `STOP_DATE` — Stop when posts are older than this date (YYYY-MM-DD), or "" to disable
-- `MAX_POSTS` — Limit posts (0 = unlimited)
-- `MAX_SCROLLS` — Max scroll attempts (default 500)
-- `SCROLL_DELAY_MIN/MAX` — Delay between scrolls (2-5s)
-- `CDP_PORT` — Chrome debugging port (default 9222)
+**Ports:**
+- Server: `localhost:5003`
 
 ---
 
-## How It Connects to Chrome
+## How It Works
 
-1. Checks if port 9222 is open (Chrome with debugging)
-2. If yes: connects to existing Chrome via CDP
-3. If no: launches Chrome with `--remote-debugging-port=9222`
-4. Uses existing Instagram session (no login needed)
+1. **Tampermonkey script** runs on instagram.com
+2. Intercepts XHR and fetch requests to Instagram's API
+3. Extracts post data (shortcode, caption, image, video URLs)
+4. Sends data to local server at `localhost:5003`
+5. **Server** receives data, downloads media, saves to folders
+
+**Why this approach:**
+- No need to close Chrome
+- Uses your existing Instagram login
+- Works on any Instagram page (profile, feed, etc.)
+- No remote debugging needed
+
+---
+
+## Changelog
+
+**2026-04-28 — Tampermonkey Rewrite**
+- Replaced Playwright/CDP approach with Tampermonkey script
+- Script intercepts API responses directly in browser
+- Local Flask server receives and downloads media
+- Added UI panel with start/stop and stop date
+
+**2026-04-28 — Initial Creation**
+- Created Playwright-based scraper (replaced)
 
 ---
 
 ## Features
 
-- Network interception (no DOM scraping, survives class changes)
-- Connects to running Chrome (no need to close it)
-- Extracts shortcode, caption, image URL, video URL
-- Downloads media to organized folder structure
-- Duplicate prevention via processed shortcodes set
-- Error handling with 3x retry on failed downloads
-
----
-
-## Technical Notes
-
-- Intercepts `/api/v1/feed/` and `/graphql/query` responses
-- Parses Instagram's internal JSON structure for media nodes
-- Walks nested objects to find `shortcode` + `image_versions2` or `video_versions`
-- Uses `playwright.chromium.connect_over_cdp()` instead of `launch_persistent_context()`
+- API interception (XHR + fetch hooks)
+- Stop date support (stops at posts older than date)
+- Auto-scroll with random 2-5s delays
+- Duplicate prevention
+- Download images, videos, captions
+- ZIP download of all clips
+- Floating UI panel on Instagram
 
 ---
 
 ## Dependencies
 
-- **Python:** playwright, requests
-- **Browser:** Chromium (via `playwright install chromium`) or Chrome
+- **Python:** flask, flask-cors, requests
+- **Browser:** Tampermonkey extension (Chrome)
+
+---
+
+## Configuration
+
+Edit top of `tampermonkey.js`:
+- `API_SERVER` — Server URL (default: `http://localhost:5003`)
+- `stopDate` — Set via UI or hardcoded
+
+Edit top of `server.py`:
+- `PORT` — Server port (default: `5003`)
 
 ---
 
 ## Troubleshooting
 
-- **"Could not connect to Chrome"** — Open Chrome with: `open -a "Google Chrome" --args --remote-debugging-port=9222`
-- **No posts found** — Make sure you're logged into Instagram in Chrome
-- **Downloads fail** — Check internet connection; script retries 3 times
+- **"Failed to send"** — Make sure server.py is running
+- **No posts found** — Make sure you're on a profile page and scrolling
+- **Duplicates** — Clear `data/posts.json` to reset

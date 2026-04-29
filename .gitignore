@@ -1,4 +1,5 @@
 ig_archive/
+data/
 __pycache__/
 *.pyc
 .DS_Store
