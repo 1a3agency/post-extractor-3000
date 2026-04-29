@@ -16,6 +16,7 @@
     const processedShortcodes = new Set();
     let isExtracting = false;
     let stopDate = null;
+    let stopShortcode = null;
     let postCount = 0;
 
     function log(msg, level = 'info') {
@@ -216,8 +217,8 @@
             </style>
             <div id="pe3000-card">
                 <h3>⛏ Post Extractor 3000</h3>
-                <label>Stop date (optional)</label>
-                <input type="date" id="pe3000-date" value="2025-12-16">
+                <label>Last post URL (stop here)</label>
+                <input type="text" id="pe3000-last" placeholder="https://instagram.com/p/ABC123/">
                 <button class="pe3000-start" id="pe3000-start">Start Extracting</button>
                 <button class="pe3000-stop" id="pe3000-stop" style="display:none">Stop</button>
                 <div class="pe3000-stats">Posts saved: <span id="pe3000-count">0</span></div>
@@ -248,32 +249,41 @@
     let scrollInterval = null;
 
     function startExtracting() {
-        const dateVal = document.getElementById('pe3000-date').value;
-        stopDate = dateVal ? new Date(dateVal) : null;
+        // Parse stop shortcode from URL
+        const lastUrl = document.getElementById('pe3000-last').value.trim();
+        stopShortcode = null;
+        if (lastUrl) {
+            const match = lastUrl.match(/\/(p|reel)\/([A-Za-z0-9_-]+)/);
+            if (match) {
+                stopShortcode = match[2];
+                log(`Will stop at: ${stopShortcode}`, 'info');
+            }
+        }
+
         isExtracting = true;
         updateButtons();
-        log(`Started. Stop date: ${dateVal || 'none'}`, 'ok');
+        log('Started extracting...', 'ok');
 
         // Extract from page data first
         const pagePosts = extractFromPageData();
         if (pagePosts.length > 0) {
             log(`Found ${pagePosts.length} posts in page data`, 'ok');
-            pagePosts.forEach(post => {
-                if (!processedShortcodes.has(post.shortcode)) {
-                    // Check stop date
-                    if (stopDate && post.taken_at > 0) {
-                        const postDate = new Date(post.taken_at * 1000);
-                        if (postDate < stopDate) {
-                            log(`Stop date reached at ${post.shortcode}`, 'warn');
-                            isExtracting = false;
-                            updateButtons();
-                            return;
-                        }
-                    }
+            for (const post of pagePosts) {
+                if (processedShortcodes.has(post.shortcode)) continue;
+
+                // Check stop shortcode
+                if (stopShortcode && post.shortcode === stopShortcode) {
                     processedShortcodes.add(post.shortcode);
                     sendToServer('/api/posts', post);
+                    log(`Stop shortcode reached: ${stopShortcode}`, 'warn');
+                    isExtracting = false;
+                    updateButtons();
+                    return;
                 }
-            });
+
+                processedShortcodes.add(post.shortcode);
+                sendToServer('/api/posts', post);
+            }
         }
 
         // Extract from DOM
@@ -292,16 +302,25 @@
 
     function extractAndSendDOM() {
         const domPosts = extractFromDOM();
-        domPosts.forEach(post => {
-            if (!processedShortcodes.has(post.shortcode)) {
-                processedShortcodes.add(post.shortcode);
-                sendToServer('/api/shortcode', {
-                    shortcode: post.shortcode,
-                    image_url: post.image_url,
-                    is_video: post.is_video
-                });
+        for (const post of domPosts) {
+            if (processedShortcodes.has(post.shortcode)) continue;
+
+            processedShortcodes.add(post.shortcode);
+            sendToServer('/api/shortcode', {
+                shortcode: post.shortcode,
+                image_url: post.image_url,
+                is_video: post.is_video
+            });
+
+            // Check stop shortcode
+            if (stopShortcode && post.shortcode === stopShortcode) {
+                log(`Stop shortcode reached: ${stopShortcode}`, 'warn');
+                isExtracting = false;
+                if (scrollInterval) clearInterval(scrollInterval);
+                updateButtons();
+                return;
             }
-        });
+        }
     }
 
     function stopExtracting() {
