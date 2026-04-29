@@ -17,16 +17,23 @@ playwright install chromium
 ```
 
 **Before running:**
-- Close all Chrome windows (the script launches Chrome with your profile)
 - Edit `TARGET_PROFILE` at the top of `scraper.py`
+- If Chrome is open, the script connects to it automatically
+- If Chrome is closed, the script launches it with debugging enabled
 
 ---
 
 ## Changelog
 
+**2026-04-28 — CDP Connection (no need to close Chrome)**
+- Switched from `launch_persistent_context` to `connect_over_cdp`
+- Connects to running Chrome via remote debugging port 9222
+- If Chrome is closed, script launches it with debugging enabled
+- No need to close Chrome before running
+
 **2026-04-28 — Initial Creation**
 - Created scraper.py with Playwright network interception
-- No DOM scraping — intercepts GraphQL/API responses instead
+- No DOM scraping — intercepts GraphQL/API responses
 - Human-like scrolling with random 2-5s delays
 - Downloads images, videos, and captions
 - Organized output in `post_[shortcode]` folders
@@ -54,13 +61,23 @@ post-extractor-3000/
 - `MAX_POSTS` — Limit posts (0 = unlimited)
 - `MAX_SCROLLS` — Max scroll attempts (default 100)
 - `SCROLL_DELAY_MIN/MAX` — Delay between scrolls (2-5s)
+- `CDP_PORT` — Chrome debugging port (default 9222)
+
+---
+
+## How It Connects to Chrome
+
+1. Checks if port 9222 is open (Chrome with debugging)
+2. If yes: connects to existing Chrome via CDP
+3. If no: launches Chrome with `--remote-debugging-port=9222`
+4. Uses existing Instagram session (no login needed)
 
 ---
 
 ## Features
 
 - Network interception (no DOM scraping, survives class changes)
-- Uses existing Chrome login session (persistent context)
+- Connects to running Chrome (no need to close it)
 - Extracts shortcode, caption, image URL, video URL
 - Downloads media to organized folder structure
 - Duplicate prevention via processed shortcodes set
@@ -73,19 +90,19 @@ post-extractor-3000/
 - Intercepts `/api/v1/feed/` and `/graphql/query` responses
 - Parses Instagram's internal JSON structure for media nodes
 - Walks nested objects to find `shortcode` + `image_versions2` or `video_versions`
-- Chrome user data: `~/Library/Application Support/Google/Chrome`
+- Uses `playwright.chromium.connect_over_cdp()` instead of `launch_persistent_context()`
 
 ---
 
 ## Dependencies
 
 - **Python:** playwright, requests
-- **Browser:** Chromium (via `playwright install chromium`)
+- **Browser:** Chromium (via `playwright install chromium`) or Chrome
 
 ---
 
 ## Troubleshooting
 
-- **"Chrome is already running"** — Close all Chrome windows before running
+- **"Could not connect to Chrome"** — Open Chrome with: `open -a "Google Chrome" --args --remote-debugging-port=9222`
 - **No posts found** — Make sure you're logged into Instagram in Chrome
 - **Downloads fail** — Check internet connection; script retries 3 times

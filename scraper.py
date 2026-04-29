@@ -1,6 +1,9 @@
 """
 Post Extractor 3000 — Instagram Profile Scraper
 Uses Playwright network interception to extract posts without DOM scraping.
+
+Connects to your running Chrome via CDP (remote debugging).
+No need to close Chrome.
 """
 
 import json
@@ -9,7 +12,8 @@ import re
 import sys
 import time
 import random
-import hashlib
+import subprocess
+import socket
 from pathlib import Path
 from datetime import datetime
 
@@ -24,10 +28,7 @@ MAX_SCROLLS = 100  # Safety limit to prevent infinite loops
 SCROLL_DELAY_MIN = 2
 SCROLL_DELAY_MAX = 5
 OUTPUT_DIR = Path(__file__).parent / "ig_archive"
-
-# Chrome user data directory (macOS)
-CHROME_USER_DATA = os.path.expanduser("~/Library/Application Support/Google/Chrome")
-CHROME_PROFILE = "Default"  # Change if you use a different profile
+CDP_PORT = 9222
 
 # ─── State ──────────────────────────────────────────────────────────────────────
 
@@ -70,6 +71,34 @@ def download_file(url, filepath, retries=3):
                 return False
     return False
 
+
+def is_port_open(port):
+    """Check if a port is listening."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+def launch_chrome_with_debugging():
+    """Launch Chrome with remote debugging enabled."""
+    chrome_paths = [
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    ]
+
+    for chrome_path in chrome_paths:
+        if os.path.exists(chrome_path):
+            log(f"Launching Chrome with remote debugging on port {CDP_PORT}...", "info")
+            subprocess.Popen([
+                chrome_path,
+                f"--remote-debugging-port={CDP_PORT}",
+                "--no-first-run",
+                "--no-default-browser-check",
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            time.sleep(3)
+            return True
+
+    return False
+
 # ─── Post Extraction ────────────────────────────────────────────────────────────
 
 def extract_post_from_graphql(data):
@@ -78,7 +107,6 @@ def extract_post_from_graphql(data):
 
     def walk(obj, path=""):
         if isinstance(obj, dict):
-            # Look for media nodes
             if "shortcode" in obj and ("image_versions2" in obj or "video_versions" in obj or "display_url" in obj):
                 posts.append(parse_media_node(obj))
             elif "node" in obj and isinstance(obj["node"], dict):
@@ -175,7 +203,6 @@ def handle_response(response: Response):
 
     url = response.url
 
-    # Filter for Instagram API endpoints
     if not any(endpoint in url for endpoint in [
         "/api/v1/feed/",
         "/graphql/query",
@@ -183,7 +210,6 @@ def handle_response(response: Response):
     ]):
         return
 
-    # Skip non-JSON responses
     content_type = response.headers.get("content-type", "")
     if "json" not in content_type and "text" not in content_type:
         return
@@ -193,7 +219,6 @@ def handle_response(response: Response):
     except Exception:
         return
 
-    # Extract posts from the response
     new_posts = extract_post_from_graphql(data)
     if not new_posts:
         new_posts = extract_from_timeline_feed(data)
@@ -298,22 +323,36 @@ def main():
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     with sync_playwright() as p:
-        log("Launching browser with persistent context...", "info")
+        # Check if Chrome debugging port is available
+        if is_port_open(CDP_PORT):
+            log(f"Connecting to Chrome on port {CDP_PORT}...", "info")
+            browser = p.chromium.connect_over_cdp(f"http://localhost:{CDP_PORT}")
+        else:
+            # Try to launch Chrome with debugging
+            if launch_chrome_with_debugging() and is_port_open(CDP_PORT):
+                log(f"Connected to newly launched Chrome on port {CDP_PORT}", "ok")
+                browser = p.chromium.connect_over_cdp(f"http://localhost:{CDP_PORT}")
+            else:
+                log("Could not connect to Chrome.", "err")
+                log("", "info")
+                log("To fix this, open Chrome with remote debugging enabled:", "info")
+                log("", "info")
+                log("  Option 1: Run this command in Terminal:", "info")
+                log('  open -a "Google Chrome" --args --remote-debugging-port=9222', "info")
+                log("", "info")
+                log("  Option 2: Quit Chrome completely, then run this script again.", "info")
+                log("  The script will launch Chrome with debugging enabled.", "info")
+                sys.exit(1)
 
-        # Launch with user's Chrome profile for existing login session
-        context = p.chromium.launch_persistent_context(
-            user_data_dir=CHROME_USER_DATA,
-            headless=False,
-            channel="chrome",
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-            ],
-            viewport={"width": 1280, "height": 900},
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        )
-
-        page = context.new_page()
+        # Get or create a page
+        contexts = browser.contexts
+        if contexts and contexts[0].pages:
+            page = contexts[0].pages[0]
+            log("Using existing Chrome tab", "info")
+        else:
+            context = browser.new_context()
+            page = context.new_page()
+            log("Opened new tab", "info")
 
         # Set up network response listener
         page.on("response", handle_response)
@@ -337,7 +376,6 @@ def main():
             else:
                 consecutive_no_new += 1
 
-            # Stop conditions
             if MAX_POSTS > 0 and len(processed_shortcodes) >= MAX_POSTS:
                 log(f"Reached max posts limit ({MAX_POSTS})", "warn")
                 break
@@ -346,7 +384,6 @@ def main():
                 log("No new posts found after 5 scrolls. Done.", "warn")
                 break
 
-            # Check if we can scroll more
             at_bottom = page.evaluate("""
                 () => window.innerHeight + window.scrollY >= document.body.scrollHeight - 100
             """)
@@ -363,8 +400,8 @@ def main():
         log(f"Scrolling complete. {len(extracted_posts)} posts extracted.", "ok")
         print()
 
-        # Close browser
-        context.close()
+        # Disconnect from browser (don't close user's Chrome)
+        browser.close()
 
         # Download all media
         log("Starting downloads...", "info")
