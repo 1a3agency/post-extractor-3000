@@ -48,7 +48,9 @@
     // ─── DOM Scraping (sorted top-to-bottom) ──────────────────────────
 
     function extractFromDOM() {
-        const links = document.querySelectorAll('a[href*="/p/"], a[href*="/reel/"]');
+        // Only get posts from main grid, not suggestions
+        const mainSection = document.querySelector('main') || document.body;
+        const links = mainSection.querySelectorAll('a[href*="/p/"], a[href*="/reel/"]');
         const results = [];
         const seen = new Set();
 
@@ -58,7 +60,11 @@
             seen.add(match[2]);
 
             const shortcode = match[2];
+
+            // Skip if link is outside main scroll area (suggestions sidebar)
             const rect = link.getBoundingClientRect();
+            if (rect.left > window.innerWidth * 0.7) return; // skip right sidebar
+            if (rect.top < 0) return; // skip header
 
             let imageUrl = '';
             const img = link.querySelector('img') || link.closest('article')?.querySelector('img');
@@ -74,9 +80,7 @@
             });
         });
 
-        // Sort by vertical position (top of page = newest = first)
         results.sort((a, b) => a.top - b.top);
-
         return results;
     }
 
@@ -84,7 +88,9 @@
 
     function processPosts(posts) {
         for (const post of posts) {
-            if (processedShortcodes.has(post.shortcode)) continue;
+            if (processedShortcodes.has(post.shortcode)) {
+                continue;
+            }
 
             processedShortcodes.add(post.shortcode);
 
@@ -106,10 +112,10 @@
                 isExtracting = false;
                 if (scrollInterval) clearInterval(scrollInterval);
                 updateButtons();
-                return true; // stopped
+                return true;
             }
         }
-        return false; // not stopped
+        return false;
     }
 
     // ─── Page Data Extraction ─────────────────────────────────────────
@@ -256,6 +262,7 @@
         // First pass: extract from DOM (sorted top-to-bottom)
         const domPosts = extractFromDOM();
         log(`Found ${domPosts.length} posts on page`, 'info');
+        log(`Shortcodes: ${domPosts.map(p => p.shortcode).join(', ')}`, 'debug');
 
         if (processPosts(domPosts)) return; // stopped
 
