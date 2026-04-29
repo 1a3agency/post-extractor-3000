@@ -17,9 +17,10 @@ playwright install chromium
 ```
 
 **Before running:**
-- Edit `TARGET_PROFILE` at the top of `scraper.py`
-- If Chrome is open, the script connects to it automatically
-- If Chrome is closed, the script launches it with debugging enabled
+- Edit config at top of `scraper.py`:
+  - `TARGET_PROFILE` — Instagram URL to scrape
+  - `STOP_DATE` — Stop when posts are older than this date (YYYY-MM-DD), or "" to disable
+- Make sure Chrome is open and logged into Instagram
 
 ---
 
@@ -58,8 +59,9 @@ post-extractor-3000/
 
 **Config (top of scraper.py):**
 - `TARGET_PROFILE` — Instagram URL to scrape
+- `STOP_DATE` — Stop when posts are older than this date (YYYY-MM-DD), or "" to disable
 - `MAX_POSTS` — Limit posts (0 = unlimited)
-- `MAX_SCROLLS` — Max scroll attempts (default 100)
+- `MAX_SCROLLS` — Max scroll attempts (default 500)
 - `SCROLL_DELAY_MIN/MAX` — Delay between scrolls (2-5s)
 - `CDP_PORT` — Chrome debugging port (default 9222)
 

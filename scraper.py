@@ -22,11 +22,12 @@ from playwright.sync_api import sync_playwright, Response
 
 # ─── Configuration ──────────────────────────────────────────────────────────────
 
-TARGET_PROFILE = "https://www.instagram.com/antigravityco/"
+TARGET_PROFILE = "https://www.instagram.com/virginmusicbrasil/"
 MAX_POSTS = 0  # 0 = unlimited
-MAX_SCROLLS = 100  # Safety limit to prevent infinite loops
+MAX_SCROLLS = 500  # Safety limit to prevent infinite loops
 SCROLL_DELAY_MIN = 2
 SCROLL_DELAY_MAX = 5
+STOP_DATE = "2025-12-16"  # Stop when posts are older than this date (YYYY-MM-DD), or "" to disable
 OUTPUT_DIR = Path(__file__).parent / "ig_archive"
 CDP_PORT = 9222
 
@@ -367,12 +368,38 @@ def main():
 
         # Scroll and extract
         consecutive_no_new = 0
+        stop_date = datetime.strptime(STOP_DATE, "%Y-%m-%d") if STOP_DATE else None
+
         while scroll_count < MAX_SCROLLS:
+            prev_count = len(extracted_posts)
             new_posts = scroll_page(page)
 
             if new_posts > 0:
                 consecutive_no_new = 0
                 log(f"Found {new_posts} new posts. Total: {len(processed_shortcodes)}", "ok")
+
+                # Check if we've reached posts older than stop date
+                if stop_date:
+                    for post in extracted_posts[prev_count:]:
+                        if post["taken_at"] > 0:
+                            post_date = datetime.fromtimestamp(post["taken_at"])
+                            if post_date < stop_date:
+                                log(f"Reached stop date ({STOP_DATE}). Post {post['shortcode']} is from {post['date']}", "warn")
+                                break
+                    else:
+                        # No posts older than stop date found, continue
+                        pass
+                    # Check all extracted posts for stop date
+                    oldest_reached = False
+                    for post in extracted_posts:
+                        if post["taken_at"] > 0:
+                            post_date = datetime.fromtimestamp(post["taken_at"])
+                            if post_date < stop_date:
+                                oldest_reached = True
+                                break
+                    if oldest_reached:
+                        log(f"Stopping: reached posts older than {STOP_DATE}", "warn")
+                        break
             else:
                 consecutive_no_new += 1
 
@@ -380,8 +407,8 @@ def main():
                 log(f"Reached max posts limit ({MAX_POSTS})", "warn")
                 break
 
-            if consecutive_no_new >= 5:
-                log("No new posts found after 5 scrolls. Done.", "warn")
+            if consecutive_no_new >= 10:
+                log("No new posts found after 10 scrolls. Done.", "warn")
                 break
 
             at_bottom = page.evaluate("""
