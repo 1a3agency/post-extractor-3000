@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Post Extractor 3000
 // @namespace    http://tampermonkey.net/
-// @version      9.0
+// @version      10.0
 // @description  Extract Instagram posts with captions and videos
 // @match        https://www.instagram.com/*
 // @grant        GM_xmlhttpRequest
