@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Post Extractor 3000
 // @namespace    http://tampermonkey.net/
-// @version      5.0
+// @version      6.0
 // @description  Extract Instagram posts via DOM scraping
 // @match        https://www.instagram.com/*
 // @grant        GM_xmlhttpRequest
