@@ -141,12 +141,20 @@ def save_post(post):
         with open(caption_file, "w", encoding="utf-8") as f:
             f.write(post["caption"])
 
-    # Download image
-    if post.get("image_url"):
-        image_file = post_dir / f"{prefix}_thumbnail.jpg"
+    # Download images (supports carousel with multiple images)
+    images = post.get("images", [])
+    if not images and post.get("image_url"):
+        images = [post["image_url"]]
+
+    for i, img_url in enumerate(images):
+        if len(images) == 1:
+            image_file = post_dir / f"{prefix}_thumbnail.jpg"
+        else:
+            image_file = post_dir / f"{prefix}_image_{i+1}.jpg"
+
         if not image_file.exists():
-            print(f"  ↓ Image: {shortcode}")
-            download_file(post["image_url"], image_file)
+            print(f"  ↓ Image {i+1}: {shortcode}")
+            download_file(img_url, image_file)
 
     # Download video
     if post.get("video_url"):
@@ -157,13 +165,15 @@ def save_post(post):
 
     # Save metadata
     meta_file = post_dir / f"{prefix}_meta.json"
+    img_count = len(post.get("images", [])) or (1 if post.get("image_url") else 0)
     meta = {
         "shortcode": shortcode,
         "post_id": post.get("post_id", ""),
         "date": post.get("date", "unknown"),
         "media_type": post.get("media_type", 1),
         "has_video": bool(post.get("video_url")),
-        "has_image": bool(post.get("image_url")),
+        "has_image": img_count > 0,
+        "image_count": img_count,
         "caption_length": len(post.get("caption", "")),
     }
     with open(meta_file, "w", encoding="utf-8") as f:
@@ -256,6 +266,7 @@ def receive_full():
         "post_id": shortcode,
         "caption": data.get("caption", ""),
         "image_url": data.get("image_url", ""),
+        "images": data.get("images", []),
         "video_url": data.get("video_url", ""),
         "taken_at": 0,
         "media_type": 2 if data.get("video_url") else 1,
@@ -265,9 +276,10 @@ def receive_full():
     posts.append(post)
     save_posts(posts)
 
+    img_count = len(post["images"]) if post["images"] else (1 if post["image_url"] else 0)
     has_caption = "✓" if post["caption"] else "✗"
     has_video = "✓" if post["video_url"] else "✗"
-    print(f"✓ {shortcode} caption={has_caption} video={has_video}")
+    print(f"✓ {shortcode} caption={has_caption} images={img_count} video={has_video}")
     save_post(post)
 
     return jsonify({"status": "ok", "shortcode": shortcode, "total": len(posts)})

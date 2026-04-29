@@ -78,7 +78,18 @@ post-extractor-3000/
 
 ## Changelog
 
-**2026-04-29 — v13.0: Click-based extraction**
+**2026-04-29 — v15.0: Fix image extraction**
+- Less restrictive image filtering in modal
+- Better image counting in metadata
+- Added debug logs for image discovery
+
+**2026-04-29 — v14.0: Carousel support + Better caption extraction**
+- Clicks through all carousel slides to grab all images
+- Better caption extraction (looks for longer text, filters out usernames)
+- Server saves multiple images (image_1.jpg, image_2.jpg, etc.)
+- Single image posts still save as thumbnail.jpg
+
+**2026-04-29 — v13.0: Click-based extraction with video thumbnails**
 - Clicks each post to open modal
 - Extracts caption, image, video from modal DOM
 - Grabs video thumbnail from video.poster

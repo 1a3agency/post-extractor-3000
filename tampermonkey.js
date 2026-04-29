@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Post Extractor 3000
 // @namespace    http://tampermonkey.net/
-// @version      13.0
+// @version      15.0
 // @description  Extract Instagram posts by clicking each post
 // @match        https://www.instagram.com/*
 // @grant        GM_xmlhttpRequest
@@ -69,81 +69,122 @@
 
         // Click the post
         element.click();
-        await wait(2000);
+        await wait(3000);
 
         // Look for the modal/dialog
         const modal = document.querySelector('div[role="dialog"]') ||
-                      document.querySelector('article[role="presentation"]') ||
-                      document.querySelector('[class*="Modal"]');
+                      document.querySelector('article[role="presentation"]');
 
         if (!modal) {
             log(`${shortcode}: no modal found`, 'warn');
-            // Try to close any overlay
             closePost();
-            return { caption: '', image_url: '', video_url: '' };
+            return { caption: '', images: [], video_url: '' };
         }
 
         let caption = '';
-        let imageUrl = '';
+        let images = [];
         let videoUrl = '';
 
-        // Get caption
-        const captionEl = modal.querySelector('h1') ||
-                         modal.querySelector('[class*="Caption"]') ||
-                         modal.querySelector('ul > li span');
-        if (captionEl) {
-            caption = captionEl.textContent.trim();
-        }
+        // ─── Get caption ──────────────────────────────────────────────
+        // Look for caption in various locations
+        const captionSelectors = [
+            'h1',                                          // Main caption
+            'ul[class*="x"] li span[dir="auto"]',          // Caption span
+            'span[dir="auto"]',                            // Auto-direction spans
+            '[class*="Caption"]',                          // Caption class
+            'div[class*="x"] > ul > li > div > span',      // Nested spans
+        ];
 
-        // Get image
-        const img = modal.querySelector('img[src*="fbcdn"]');
-        if (img && !img.src.includes('s150x150')) {
-            imageUrl = img.src;
-        }
-
-        // Get video
-        const video = modal.querySelector('video');
-        if (video) {
-            // Get video thumbnail/poster first
-            if (video.poster && !imageUrl) {
-                imageUrl = video.poster;
-            }
-
-            videoUrl = video.src || video.querySelector('source')?.src || '';
-
-            // Try to get actual video URL (not blob)
-            if (videoUrl.startsWith('blob:')) {
-                videoUrl = '';
-                const allScripts = document.querySelectorAll('script');
-                for (const script of allScripts) {
-                    const text = script.textContent;
-                    const videoMatch = text.match(/"video_url":"([^"]+)"/);
-                    if (videoMatch) {
-                        videoUrl = videoMatch[1].replace(/\\u0026/g, '&');
-                        break;
-                    }
-                }
-            }
-        }
-
-        // Also check for carousel (multiple images)
-        const carouselImgs = modal.querySelectorAll('img[src*="fbcdn"]');
-        if (carouselImgs.length > 1 && !imageUrl) {
-            for (const img of carouselImgs) {
-                if (!img.src.includes('s150x150')) {
-                    imageUrl = img.src;
+        for (const sel of captionSelectors) {
+            const els = modal.querySelectorAll(sel);
+            for (const el of els) {
+                const text = el.textContent.trim();
+                // Caption should be longer than just username or emoji
+                if (text.length > 20 && !text.includes('Verified') && !text.includes('followers')) {
+                    caption = text;
                     break;
                 }
             }
+            if (caption) break;
         }
 
-        log(`${shortcode}: caption=${caption ? '✓' : '✗'} video=${videoUrl ? '✓' : '✗'} image=${imageUrl ? '✓' : '✗'}`, 'info');
+        // ─── Handle carousel (click through all slides) ───────────────
+        const nextBtn = modal.querySelector('button[aria-label="Next"]') ||
+                       modal.querySelector('svg[aria-label="Next"]')?.closest('button');
+
+        let slideCount = 0;
+        const maxSlides = 10;
+
+        while (slideCount < maxSlides) {
+            await wait(500);
+
+            // Get ALL images in modal, be less restrictive
+            const imgEls = modal.querySelectorAll('img[src*="fbcdn.net"]');
+            for (const img of imgEls) {
+                const src = img.src;
+                // Skip only profile pics and tiny icons
+                if (src.includes('s150x150') || src.includes('s32x32')) continue;
+                if (src.includes('profile_pic')) continue;
+                if (!images.includes(src)) {
+                    images.push(src);
+                    log(`  Found image: ${src.substring(0, 50)}...`, 'debug');
+                }
+            }
+
+            // Get video
+            const video = modal.querySelector('video');
+            if (video && !videoUrl) {
+                if (video.poster && !images.includes(video.poster)) {
+                    images.push(video.poster);
+                }
+                videoUrl = video.src || '';
+                if (videoUrl.startsWith('blob:')) {
+                    videoUrl = '';
+                }
+            }
+
+            // Try to click next slide
+            const nextButton = modal.querySelector('button[aria-label="Next"]') ||
+                              modal.querySelector('svg[aria-label="Next"]')?.closest('button');
+            if (nextButton && !nextButton.disabled) {
+                nextButton.click();
+                await wait(1000);
+                slideCount++;
+            } else {
+                break;
+            }
+        }
+
+        // Final catch - get any remaining images
+        const finalImgs = modal.querySelectorAll('img[src*="fbcdn.net"]');
+        for (const img of finalImgs) {
+            const src = img.src;
+            if (!src.includes('s150x150') && !src.includes('s32x32') && !src.includes('profile_pic')) {
+                if (!images.includes(src)) {
+                    images.push(src);
+                }
+            }
+        }
+
+        // Get video if still not found
+        const video = modal.querySelector('video');
+        if (video && !videoUrl) {
+            if (video.poster && images.length === 0) {
+                images.push(video.poster);
+            }
+            videoUrl = video.src || '';
+            if (videoUrl.startsWith('blob:')) {
+                videoUrl = '';
+            }
+        }
+
+        log(`${shortcode}: caption=${caption ? '✓' : '✗'} images=${images.length} video=${videoUrl ? '✓' : '✗'}`, 'info');
 
         // Close the modal
         closePost();
         await wait(500);
 
-        return { caption, image_url: imageUrl, video_url: videoUrl };
+        return { caption, images, video_url: videoUrl };
     }
 
     function closePost() {
@@ -172,7 +213,7 @@
                 if (resp.status === 200) {
                     savedCount++;
                     updateUI();
-                    log(`Saved: ${post.shortcode} (${savedCount}/${maxPosts})`, 'ok');
+                    log(`Saved: ${post.shortcode} (${savedCount}/${maxPosts}) caption=${post.caption ? '✓' : '✗'} images=${post.images?.length || 0} video=${post.video_url ? '✓' : '✗'}`, 'ok');
                 }
                 if (callback) callback();
             },
