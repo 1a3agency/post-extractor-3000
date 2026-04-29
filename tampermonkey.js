@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Post Extractor 3000
 // @namespace    http://tampermonkey.net/
-// @version      4.0
+// @version      5.0
 // @description  Extract Instagram posts via DOM scraping
 // @match        https://www.instagram.com/*
 // @grant        GM_xmlhttpRequest
@@ -15,21 +15,16 @@
     const API_SERVER = 'http://localhost:5003';
     const processedShortcodes = new Set();
     let isExtracting = false;
-    let stopDate = null;
     let stopShortcode = null;
     let postCount = 0;
+    let scrollInterval = null;
 
     function log(msg, level = 'info') {
-        const styles = {
-            info: 'color: #a855f7',
-            ok: 'color: #22c55e',
-            warn: 'color: #eab308',
-            err: 'color: #ef4444'
-        };
+        const styles = { info: 'color: #a855f7', ok: 'color: #22c55e', warn: 'color: #eab308', err: 'color: #ef4444' };
         console.log(`%c[PE3000] ${msg}`, styles[level] || styles.info);
     }
 
-    // ─── Send to Server (bypasses CSP) ────────────────────────────────
+    // ─── Send to Server ───────────────────────────────────────────────
 
     function sendToServer(endpoint, data) {
         GM_xmlhttpRequest({
@@ -44,58 +39,89 @@
                     log(`Saved: ${data.shortcode} (${postCount})`, 'ok');
                 }
             },
-            onerror: function(err) {
+            onerror: function() {
                 log(`Failed: ${data.shortcode}`, 'err');
             }
         });
     }
 
-    // ─── DOM Scraping ─────────────────────────────────────────────────
+    // ─── DOM Scraping (sorted top-to-bottom) ──────────────────────────
 
     function extractFromDOM() {
         const links = document.querySelectorAll('a[href*="/p/"], a[href*="/reel/"]');
-        const seen = new Set();
         const results = [];
+        const seen = new Set();
 
         links.forEach(link => {
             const match = link.href.match(/\/(p|reel)\/([A-Za-z0-9_-]+)/);
-            if (match && !seen.has(match[2])) {
-                seen.add(match[2]);
-                const shortcode = match[2];
+            if (!match || seen.has(match[2])) return;
+            seen.add(match[2]);
 
-                // Get image
-                let imageUrl = '';
-                const img = link.querySelector('img') || link.closest('article')?.querySelector('img');
-                if (img) imageUrl = img.src || '';
+            const shortcode = match[2];
+            const rect = link.getBoundingClientRect();
 
-                // Check if video/reel
-                const isReel = link.href.includes('/reel/');
-                const hasVideoIcon = link.querySelector('svg[aria-label*="Reel"]') ||
-                                     link.querySelector('svg[aria-label*="Video"]');
+            let imageUrl = '';
+            const img = link.querySelector('img') || link.closest('article')?.querySelector('img');
+            if (img) imageUrl = img.src || '';
 
-                results.push({
-                    shortcode,
-                    image_url: imageUrl,
-                    is_video: isReel || !!hasVideoIcon
-                });
-            }
+            const isReel = link.href.includes('/reel/');
+
+            results.push({
+                shortcode,
+                image_url: imageUrl,
+                is_video: isReel,
+                top: rect.top + window.scrollY
+            });
         });
+
+        // Sort by vertical position (top of page = newest = first)
+        results.sort((a, b) => a.top - b.top);
 
         return results;
     }
 
-    // ─── Extract from Page Data ───────────────────────────────────────
+    // ─── Process Posts (in order, stop at target) ─────────────────────
+
+    function processPosts(posts) {
+        for (const post of posts) {
+            if (processedShortcodes.has(post.shortcode)) continue;
+
+            processedShortcodes.add(post.shortcode);
+
+            // Send to server
+            if (post.caption !== undefined) {
+                sendToServer('/api/posts', post);
+            } else {
+                sendToServer('/api/shortcode', {
+                    shortcode: post.shortcode,
+                    image_url: post.image_url,
+                    is_video: post.is_video
+                });
+            }
+
+            // Check if we reached the stop shortcode
+            if (stopShortcode && post.shortcode === stopShortcode) {
+                log(`Reached stop post: ${stopShortcode}`, 'warn');
+                log(`Total saved: ${postCount}`, 'ok');
+                isExtracting = false;
+                if (scrollInterval) clearInterval(scrollInterval);
+                updateButtons();
+                return true; // stopped
+            }
+        }
+        return false; // not stopped
+    }
+
+    // ─── Page Data Extraction ─────────────────────────────────────────
 
     function extractFromPageData() {
         const posts = [];
 
-        // Try _sharedData
         if (window._sharedData) {
             walkForPosts(window._sharedData, posts);
             if (posts.length > 0) return posts;
         }
 
-        // Try __additionalData
         for (const key of Object.keys(window)) {
             if (key.startsWith('__additionalData') && window[key]) {
                 walkForPosts(window[key], posts);
@@ -103,11 +129,9 @@
             }
         }
 
-        // Try script tags
         document.querySelectorAll('script[type="application/json"]').forEach(script => {
             try {
-                const data = JSON.parse(script.textContent);
-                walkForPosts(data, posts);
+                walkForPosts(JSON.parse(script.textContent), posts);
             } catch (e) {}
         });
 
@@ -118,9 +142,7 @@
         if (!obj || typeof obj !== 'object' || depth > 25) return;
 
         if (obj.shortcode || obj.code) {
-            const hasMedia = obj.image_versions2 || obj.video_versions ||
-                            obj.display_url || obj.thumbnail_src ||
-                            obj.edge_media_to_caption || obj.caption;
+            const hasMedia = obj.image_versions2 || obj.video_versions || obj.display_url || obj.thumbnail_src || obj.caption;
             if (hasMedia) {
                 posts.push(parseNode(obj));
                 return;
@@ -137,24 +159,17 @@
         const shortcode = node.shortcode || node.code || '';
 
         let caption = '';
-        if (node.edge_media_to_caption?.edges?.[0]?.node?.text) {
-            caption = node.edge_media_to_caption.edges[0].node.text;
-        } else if (typeof node.caption === 'string') {
-            caption = node.caption;
-        } else if (node.caption?.text) {
-            caption = node.caption.text;
-        }
+        if (node.edge_media_to_caption?.edges?.[0]?.node?.text) caption = node.edge_media_to_caption.edges[0].node.text;
+        else if (typeof node.caption === 'string') caption = node.caption;
+        else if (node.caption?.text) caption = node.caption.text;
 
         let imageUrl = '';
         if (node.image_versions2?.candidates?.[0]?.url) imageUrl = node.image_versions2.candidates[0].url;
         else if (node.display_url) imageUrl = node.display_url;
-        else if (node.thumbnail_src) imageUrl = node.thumbnail_src;
 
         let videoUrl = '';
         if (node.video_versions?.[0]?.url) videoUrl = node.video_versions[0].url;
         else if (node.video_url) videoUrl = node.video_url;
-
-        const takenAt = node.taken_at || 0;
 
         return {
             shortcode,
@@ -162,38 +177,11 @@
             caption,
             image_url: imageUrl,
             video_url: videoUrl,
-            taken_at: takenAt,
+            taken_at: node.taken_at || 0,
             media_type: node.media_type || 1,
-            date: takenAt ? new Date(takenAt * 1000).toISOString().split('T')[0] : 'unknown'
+            date: node.taken_at ? new Date(node.taken_at * 1000).toISOString().split('T')[0] : 'unknown'
         };
     }
-
-    // ─── Network Interception ─────────────────────────────────────────
-
-    const origFetch = window.fetch;
-    window.fetch = function(...args) {
-        return origFetch.apply(this, arguments).then(response => {
-            if (isExtracting) {
-                const url = typeof args[0] === 'string' ? args[0] : args[0]?.url;
-                if (url && (url.includes('/api/') || url.includes('graphql'))) {
-                    response.clone().text().then(text => {
-                        try {
-                            const data = JSON.parse(text);
-                            const posts = [];
-                            walkForPosts(data, posts);
-                            posts.forEach(post => {
-                                if (post.shortcode && !processedShortcodes.has(post.shortcode)) {
-                                    processedShortcodes.add(post.shortcode);
-                                    sendToServer('/api/posts', post);
-                                }
-                            });
-                        } catch (e) {}
-                    }).catch(() => {});
-                }
-            }
-            return response;
-        });
-    };
 
     // ─── UI ───────────────────────────────────────────────────────────
 
@@ -217,7 +205,7 @@
             </style>
             <div id="pe3000-card">
                 <h3>⛏ Post Extractor 3000</h3>
-                <label>Last post URL (stop here)</label>
+                <label>Last post to grab (paste URL)</label>
                 <input type="text" id="pe3000-last" placeholder="https://instagram.com/p/ABC123/">
                 <button class="pe3000-start" id="pe3000-start">Start Extracting</button>
                 <button class="pe3000-stop" id="pe3000-stop" style="display:none">Stop</button>
@@ -246,10 +234,8 @@
 
     // ─── Extract Logic ────────────────────────────────────────────────
 
-    let scrollInterval = null;
-
     function startExtracting() {
-        // Parse stop shortcode from URL
+        // Parse stop shortcode
         const lastUrl = document.getElementById('pe3000-last').value.trim();
         stopShortcode = null;
         if (lastUrl) {
@@ -261,73 +247,42 @@
         }
 
         isExtracting = true;
+        postCount = 0;
+        processedShortcodes.clear();
+        updateUI();
         updateButtons();
-        log('Started extracting...', 'ok');
+        log('Started...', 'ok');
 
-        // Extract from page data first
-        const pagePosts = extractFromPageData();
-        if (pagePosts.length > 0) {
-            log(`Found ${pagePosts.length} posts in page data`, 'ok');
-            for (const post of pagePosts) {
-                if (processedShortcodes.has(post.shortcode)) continue;
+        // First pass: extract from DOM (sorted top-to-bottom)
+        const domPosts = extractFromDOM();
+        log(`Found ${domPosts.length} posts on page`, 'info');
 
-                // Check stop shortcode
-                if (stopShortcode && post.shortcode === stopShortcode) {
-                    processedShortcodes.add(post.shortcode);
-                    sendToServer('/api/posts', post);
-                    log(`Stop shortcode reached: ${stopShortcode}`, 'warn');
-                    isExtracting = false;
-                    updateButtons();
-                    return;
-                }
+        if (processPosts(domPosts)) return; // stopped
 
-                processedShortcodes.add(post.shortcode);
-                sendToServer('/api/posts', post);
-            }
-        }
-
-        // Extract from DOM
-        extractAndSendDOM();
-
-        // Auto-scroll
+        // Auto-scroll for more posts
         scrollInterval = setInterval(() => {
             if (!isExtracting) {
                 clearInterval(scrollInterval);
                 return;
             }
-            extractAndSendDOM();
-            window.scrollTo(0, document.body.scrollHeight);
-        }, 2500 + Math.random() * 2500);
-    }
 
-    function extractAndSendDOM() {
-        const domPosts = extractFromDOM();
-        for (const post of domPosts) {
-            if (processedShortcodes.has(post.shortcode)) continue;
+            const newPosts = extractFromDOM();
+            const unseen = newPosts.filter(p => !processedShortcodes.has(p.shortcode));
 
-            processedShortcodes.add(post.shortcode);
-            sendToServer('/api/shortcode', {
-                shortcode: post.shortcode,
-                image_url: post.image_url,
-                is_video: post.is_video
-            });
-
-            // Check stop shortcode
-            if (stopShortcode && post.shortcode === stopShortcode) {
-                log(`Stop shortcode reached: ${stopShortcode}`, 'warn');
-                isExtracting = false;
-                if (scrollInterval) clearInterval(scrollInterval);
-                updateButtons();
-                return;
+            if (unseen.length > 0) {
+                log(`Found ${unseen.length} new posts`, 'info');
+                if (processPosts(unseen)) return; // stopped
             }
-        }
+
+            window.scrollTo(0, document.body.scrollHeight);
+        }, 3000 + Math.random() * 2000);
     }
 
     function stopExtracting() {
         isExtracting = false;
         if (scrollInterval) clearInterval(scrollInterval);
         updateButtons();
-        log('Stopped.', 'warn');
+        log(`Stopped. Total: ${postCount}`, 'warn');
     }
 
     // ─── Init ─────────────────────────────────────────────────────────
