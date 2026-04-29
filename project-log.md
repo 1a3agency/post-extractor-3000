@@ -26,9 +26,9 @@ python3 server.py
 ```
 
 **4. Go to Instagram and click the ⛏ button (bottom right)**
-- Set stop date if needed
-- Click "Start Extracting"
-- Script auto-scrolls and captures posts
+- Enter number of posts to grab
+- Click Start
+- Links are saved to `post_links.txt` when done
 
 ---
 
@@ -41,6 +41,7 @@ post-extractor-3000/
 ├── requirements.txt
 ├── .gitignore
 ├── project-log.md
+├── post_links.txt        # Saved post links
 ├── data/
 │   └── posts.json        # Extracted post data
 └── ig_archive/           # Downloaded media (gitignored)
@@ -59,26 +60,43 @@ post-extractor-3000/
 ## How It Works
 
 1. **Tampermonkey script** runs on instagram.com
-2. Intercepts XHR and fetch requests to Instagram's API
-3. Extracts post data (shortcode, caption, image, video URLs)
-4. Sends data to local server at `localhost:5003`
-5. **Server** receives data, downloads media, saves to folders
+2. Collects post links from the profile grid
+3. **Clicks each post** to open the modal
+4. Extracts caption, image, video from the modal DOM
+5. Closes modal, moves to next post
+6. Sends data to local server at `localhost:5003`
+7. **Server** downloads media and saves to folders
+8. On stop, saves all post links to `post_links.txt`
 
 **Why this approach:**
 - No need to close Chrome
 - Uses your existing Instagram login
-- Works on any Instagram page (profile, feed, etc.)
-- No remote debugging needed
+- Extracts captions and videos reliably
+- Clicks each post individually (slower but accurate)
 
 ---
 
 ## Changelog
 
+**2026-04-29 — v13.0: Click-based extraction**
+- Clicks each post to open modal
+- Extracts caption, image, video from modal DOM
+- Grabs video thumbnail from video.poster
+- Slower but reliable
+
+**2026-04-29 — v10.0: Links + Captions + Videos**
+- Fetches each post page with browser session
+- Extracts captions from logged-in pages
+- Detects and downloads videos
+- Saves post links to `post_links.txt`
+
+**2026-04-29 — v8.0: Count-based extraction**
+- Replaced date-based with count-based (how many posts)
+- Simpler and more reliable
+
 **2026-04-28 — Tampermonkey Rewrite**
 - Replaced Playwright/CDP approach with Tampermonkey script
-- Script intercepts API responses directly in browser
 - Local Flask server receives and downloads media
-- Added UI panel with start/stop and stop date
 
 **2026-04-28 — Initial Creation**
 - Created Playwright-based scraper (replaced)
@@ -87,12 +105,12 @@ post-extractor-3000/
 
 ## Features
 
-- API interception (XHR + fetch hooks)
-- Stop date support (stops at posts older than date)
-- Auto-scroll with random 2-5s delays
+- Count-based extraction (enter how many posts)
+- Fetches full post details with your login
+- Downloads images, videos, captions
+- Saves post links to `post_links.txt`
+- Auto-scroll with random delays
 - Duplicate prevention
-- Download images, videos, captions
-- ZIP download of all clips
 - Floating UI panel on Instagram
 
 ---
@@ -108,7 +126,6 @@ post-extractor-3000/
 
 Edit top of `tampermonkey.js`:
 - `API_SERVER` — Server URL (default: `http://localhost:5003`)
-- `stopDate` — Set via UI or hardcoded
 
 Edit top of `server.py`:
 - `PORT` — Server port (default: `5003`)
@@ -118,5 +135,6 @@ Edit top of `server.py`:
 ## Troubleshooting
 
 - **"Failed to send"** — Make sure server.py is running
-- **No posts found** — Make sure you're on a profile page and scrolling
-- **Duplicates** — Clear `data/posts.json` to reset
+- **No posts found** — Make sure you're on a profile page
+- **No captions** — Script needs to fetch each post page (slower)
+- **Duplicates** — Clear `data/posts.json` and `ig_archive/` to reset

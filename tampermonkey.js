@@ -1,14 +1,11 @@
 // ==UserScript==
 // @name         Post Extractor 3000
 // @namespace    http://tampermonkey.net/
-// @version      10.0
-// @description  Extract Instagram posts with captions and videos
+// @version      13.0
+// @description  Extract Instagram posts by clicking each post
 // @match        https://www.instagram.com/*
 // @grant        GM_xmlhttpRequest
 // @connect      localhost
-// @connect      instagram.com
-// @connect      cdninstagram.com
-// @connect      fbcdn.net
 // @run-at       document-start
 // ==/UserScript==
 
@@ -21,19 +18,22 @@
     let savedCount = 0;
     let scrollInterval = null;
     const processedShortcodes = new Set();
-    const queue = [];
     const allLinks = new Set();
+    const postElements = [];
 
     function log(msg, level = 'info') {
-        const styles = { info: 'color: #a855f7', ok: 'color: #22c55e', warn: 'color: #eab308', err: 'color: #ef4444' };
+        const styles = { info: 'color: #a855f7', ok: 'color: #22c55e', warn: 'color: #eab308', err: 'color: #ef4444', debug: 'color: #64748b' };
         console.log(`%c[PE3000] ${msg}`, styles[level] || styles.info);
     }
 
-    // ─── Extract post links from DOM ──────────────────────────────────
+    function wait(ms) {
+        return new Promise(r => setTimeout(r, ms));
+    }
 
-    function extractPosts() {
+    // ─── Collect post links from page ─────────────────────────────────
+
+    function collectPostLinks() {
         const links = document.querySelectorAll('a[href*="/p/"], a[href*="/reel/"]');
-        const found = [];
         const seen = new Set();
 
         links.forEach(link => {
@@ -42,130 +42,122 @@
             seen.add(match[1]);
 
             const shortcode = match[1];
+            if (processedShortcodes.has(shortcode)) return;
+
             const rect = link.getBoundingClientRect();
-            if (rect.top < -50) return;
+            if (rect.top < -100) return;
 
-            // Save full link
-            const fullUrl = `https://www.instagram.com/p/${shortcode}/`;
-            allLinks.add(fullUrl);
+            allLinks.add(`https://www.instagram.com/p/${shortcode}/`);
 
-            let imageUrl = '';
-            const img = link.querySelector('img');
-            if (img) imageUrl = img.src || '';
-
-            found.push({
-                shortcode,
-                image_url: imageUrl,
-                is_video: link.href.includes('/reel/'),
-                top: rect.top + window.scrollY
-            });
+            if (!postElements.find(p => p.shortcode === shortcode)) {
+                postElements.push({
+                    shortcode,
+                    element: link,
+                    is_video: link.href.includes('/reel/'),
+                    top: rect.top + window.scrollY
+                });
+            }
         });
 
-        found.sort((a, b) => a.top - b.top);
-        return found;
+        postElements.sort((a, b) => a.top - b.top);
     }
 
-    // ─── Fetch post details from Instagram (with your session) ────────
+    // ─── Click post and extract data from modal ───────────────────────
 
-    function fetchPostDetails(shortcode) {
-        return new Promise((resolve) => {
-            GM_xmlhttpRequest({
-                method: 'GET',
-                url: `https://www.instagram.com/p/${shortcode}/`,
-                onload: function(resp) {
-                    const html = resp.responseText;
-                    let caption = '';
-                    let imageUrl = '';
-                    let videoUrl = '';
+    async function extractFromPost(postInfo) {
+        const { shortcode, element } = postInfo;
 
-                    try {
-                        // Look for shared data with post info
-                        const sharedDataMatch = html.match(/window\._sharedData\s*=\s*({.+?});<\/script>/);
-                        if (sharedDataMatch) {
-                            const data = JSON.parse(sharedDataMatch[1]);
-                            const media = findMediaInObject(data);
-                            if (media) {
-                                caption = media.caption?.text || '';
-                                imageUrl = media.image_versions2?.candidates?.[0]?.url || media.display_url || '';
-                                if (media.video_versions?.length) {
-                                    videoUrl = media.video_versions[0].url;
-                                }
-                            }
-                        }
+        // Click the post
+        element.click();
+        await wait(2000);
 
-                        // Fallback: look for additional data
-                        if (!caption || !imageUrl) {
-                            const addDataMatch = html.match(/window\.__additionalDataLoaded\('[^']+',\s*({.+?})\)/);
-                            if (addDataMatch) {
-                                const data = JSON.parse(addDataMatch[1]);
-                                const media = findMediaInObject(data);
-                                if (media) {
-                                    if (!caption) caption = media.caption?.text || '';
-                                    if (!imageUrl) imageUrl = media.image_versions2?.candidates?.[0]?.url || media.display_url || '';
-                                    if (!videoUrl && media.video_versions?.length) {
-                                        videoUrl = media.video_versions[0].url;
-                                    }
-                                }
-                            }
-                        }
+        // Look for the modal/dialog
+        const modal = document.querySelector('div[role="dialog"]') ||
+                      document.querySelector('article[role="presentation"]') ||
+                      document.querySelector('[class*="Modal"]');
 
-                        // Fallback: look for JSON in script tags
-                        if (!caption || !imageUrl) {
-                            const scriptTags = html.match(/<script type="application\/json"[^>]*>(.+?)<\/script>/g);
-                            if (scriptTags) {
-                                for (const tag of scriptTags) {
-                                    const jsonMatch = tag.match(/>(.+?)<\/script>/);
-                                    if (jsonMatch) {
-                                        try {
-                                            const data = JSON.parse(jsonMatch[1]);
-                                            const media = findMediaInObject(data);
-                                            if (media) {
-                                                if (!caption) caption = media.caption?.text || '';
-                                                if (!imageUrl) imageUrl = media.image_versions2?.candidates?.[0]?.url || media.display_url || '';
-                                                if (!videoUrl && media.video_versions?.length) {
-                                                    videoUrl = media.video_versions[0].url;
-                                                }
-                                                break;
-                                            }
-                                        } catch (e) {}
-                                    }
-                                }
-                            }
-                        }
+        if (!modal) {
+            log(`${shortcode}: no modal found`, 'warn');
+            // Try to close any overlay
+            closePost();
+            return { caption: '', image_url: '', video_url: '' };
+        }
 
-                    } catch (e) {
-                        log(`Parse error for ${shortcode}: ${e.message}`, 'err');
+        let caption = '';
+        let imageUrl = '';
+        let videoUrl = '';
+
+        // Get caption
+        const captionEl = modal.querySelector('h1') ||
+                         modal.querySelector('[class*="Caption"]') ||
+                         modal.querySelector('ul > li span');
+        if (captionEl) {
+            caption = captionEl.textContent.trim();
+        }
+
+        // Get image
+        const img = modal.querySelector('img[src*="fbcdn"]');
+        if (img && !img.src.includes('s150x150')) {
+            imageUrl = img.src;
+        }
+
+        // Get video
+        const video = modal.querySelector('video');
+        if (video) {
+            // Get video thumbnail/poster first
+            if (video.poster && !imageUrl) {
+                imageUrl = video.poster;
+            }
+
+            videoUrl = video.src || video.querySelector('source')?.src || '';
+
+            // Try to get actual video URL (not blob)
+            if (videoUrl.startsWith('blob:')) {
+                videoUrl = '';
+                const allScripts = document.querySelectorAll('script');
+                for (const script of allScripts) {
+                    const text = script.textContent;
+                    const videoMatch = text.match(/"video_url":"([^"]+)"/);
+                    if (videoMatch) {
+                        videoUrl = videoMatch[1].replace(/\\u0026/g, '&');
+                        break;
                     }
-
-                    resolve({ caption, imageUrl, videoUrl });
-                },
-                onerror: function() {
-                    resolve({ caption: '', imageUrl: '', videoUrl: '' });
                 }
-            });
-        });
+            }
+        }
+
+        // Also check for carousel (multiple images)
+        const carouselImgs = modal.querySelectorAll('img[src*="fbcdn"]');
+        if (carouselImgs.length > 1 && !imageUrl) {
+            for (const img of carouselImgs) {
+                if (!img.src.includes('s150x150')) {
+                    imageUrl = img.src;
+                    break;
+                }
+            }
+        }
+
+        log(`${shortcode}: caption=${caption ? '✓' : '✗'} video=${videoUrl ? '✓' : '✗'} image=${imageUrl ? '✓' : '✗'}`, 'info');
+
+        // Close the modal
+        closePost();
+        await wait(500);
+
+        return { caption, image_url: imageUrl, video_url: videoUrl };
     }
 
-    function findMediaInObject(obj, depth = 0) {
-        if (!obj || typeof obj !== 'object' || depth > 15) return null;
-
-        if (obj.shortcode && (obj.image_versions2 || obj.video_versions || obj.display_url)) {
-            return obj;
+    function closePost() {
+        // Try multiple ways to close
+        const closeBtn = document.querySelector('svg[aria-label="Close"]')?.closest('button') ||
+                        document.querySelector('[class*="close"]') ||
+                        document.querySelector('button[class*="Close"]');
+        if (closeBtn) {
+            closeBtn.click();
+            return;
         }
 
-        if (Array.isArray(obj)) {
-            for (const item of obj) {
-                const found = findMediaInObject(item, depth + 1);
-                if (found) return found;
-            }
-        } else {
-            for (const key of Object.keys(obj)) {
-                const found = findMediaInObject(obj[key], depth + 1);
-                if (found) return found;
-            }
-        }
-
-        return null;
+        // Press Escape
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, bubbles: true }));
     }
 
     // ─── Send to server ───────────────────────────────────────────────
@@ -180,7 +172,7 @@
                 if (resp.status === 200) {
                     savedCount++;
                     updateUI();
-                    log(`Saved: ${post.shortcode} (${savedCount}/${maxPosts}) caption=${post.caption ? 'yes' : 'no'} video=${post.video_url ? 'yes' : 'no'}`, 'ok');
+                    log(`Saved: ${post.shortcode} (${savedCount}/${maxPosts})`, 'ok');
                 }
                 if (callback) callback();
             },
@@ -191,40 +183,62 @@
         });
     }
 
-    // ─── Queue processing ─────────────────────────────────────────────
-
-    async function processQueue() {
-        if (!isExtracting || savedCount >= maxPosts || queue.length === 0) {
-            if (savedCount >= maxPosts && isExtracting) {
-                log(`Done! Saved ${savedCount} posts.`, 'ok');
-                isExtracting = false;
-                if (scrollInterval) clearInterval(scrollInterval);
-                updateButtons();
-            }
-            return;
-        }
-
-        const post = queue.shift();
-        if (processedShortcodes.has(post.shortcode)) {
-            processQueue();
-            return;
-        }
-
-        processedShortcodes.add(post.shortcode);
-
-        // Fetch full details from Instagram
-        log(`Fetching: ${post.shortcode}...`, 'info');
-        const details = await fetchPostDetails(post.shortcode);
-
-        post.caption = details.caption || '';
-        post.image_url = details.imageUrl || post.image_url;
-        post.video_url = details.videoUrl || '';
-
-        sendToServer(post, () => {
-            if (isExtracting && savedCount < maxPosts) {
-                setTimeout(processQueue, 500);
+    function saveLinks() {
+        GM_xmlhttpRequest({
+            method: 'POST',
+            url: `${API_SERVER}/api/links`,
+            headers: { 'Content-Type': 'application/json' },
+            data: JSON.stringify({ links: Array.from(allLinks) }),
+            onload: function() {
+                log(`Saved ${allLinks.size} links to file`, 'ok');
             }
         });
+    }
+
+    // ─── Main extraction loop ─────────────────────────────────────────
+
+    async function extractPosts() {
+        while (isExtracting && savedCount < maxPosts) {
+            // Collect more links if needed
+            collectPostLinks();
+
+            // Find next unprocessed post
+            const nextPost = postElements.find(p => !processedShortcodes.has(p.shortcode));
+            if (!nextPost) {
+                // Scroll to get more
+                window.scrollBy(0, 500);
+                await wait(2000);
+                collectPostLinks();
+                continue;
+            }
+
+            if (savedCount >= maxPosts) break;
+
+            processedShortcodes.add(nextPost.shortcode);
+
+            // Extract data by clicking the post
+            const data = await extractFromPost(nextPost);
+
+            // Send to server
+            await new Promise((resolve) => {
+                sendToServer({
+                    shortcode: nextPost.shortcode,
+                    caption: data.caption,
+                    image_url: data.image_url,
+                    video_url: data.video_url,
+                    is_video: nextPost.is_video
+                }, resolve);
+            });
+
+            await wait(1000);
+        }
+
+        if (isExtracting) {
+            log(`Done! Saved ${savedCount} posts.`, 'ok');
+            isExtracting = false;
+            updateButtons();
+            saveLinks();
+        }
     }
 
     // ─── UI ───────────────────────────────────────────────────────────
@@ -280,59 +294,22 @@
         maxPosts = parseInt(document.getElementById('pe3000-count').value) || 55;
         savedCount = 0;
         processedShortcodes.clear();
-        queue.length = 0;
+        postElements.length = 0;
+        allLinks.clear();
         isExtracting = true;
         updateUI();
         updateButtons();
         log(`Started. Grabbing ${maxPosts} posts.`, 'ok');
 
-        const posts = extractPosts();
-        posts.forEach(p => {
-            if (!processedShortcodes.has(p.shortcode) && queue.length + savedCount < maxPosts) {
-                queue.push(p);
-            }
-        });
-        processQueue();
-
-        scrollInterval = setInterval(() => {
-            if (!isExtracting || savedCount >= maxPosts) {
-                clearInterval(scrollInterval);
-                return;
-            }
-
-            const newPosts = extractPosts();
-            newPosts.forEach(p => {
-                if (!processedShortcodes.has(p.shortcode) && queue.length + savedCount < maxPosts) {
-                    queue.push(p);
-                }
-            });
-
-            if (queue.length > 0) processQueue();
-            window.scrollTo(0, document.body.scrollHeight);
-        }, 3000);
+        extractPosts();
     }
 
     function stopExtracting() {
         isExtracting = false;
-        if (scrollInterval) clearInterval(scrollInterval);
         updateButtons();
         log(`Stopped. Saved ${savedCount} posts.`, 'warn');
-
-        // Save links to file
         saveLinks();
-    }
-
-    function saveLinks() {
-        const links = Array.from(allLinks).join('\n');
-        GM_xmlhttpRequest({
-            method: 'POST',
-            url: `${API_SERVER}/api/links`,
-            headers: { 'Content-Type': 'application/json' },
-            data: JSON.stringify({ links: Array.from(allLinks) }),
-            onload: function() {
-                log(`Saved ${allLinks.size} links to file`, 'ok');
-            }
-        });
+        closePost();
     }
 
     if (document.readyState === 'loading') {
