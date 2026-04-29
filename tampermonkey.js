@@ -48,34 +48,39 @@
     // ─── DOM Scraping (sorted top-to-bottom) ──────────────────────────
 
     function extractFromDOM() {
-        // Only get posts from main grid, not suggestions
-        const mainSection = document.querySelector('main') || document.body;
-        const links = mainSection.querySelectorAll('a[href*="/p/"], a[href*="/reel/"]');
+        // Find ALL post links, not just in main
+        const links = document.querySelectorAll('a[href*="/p/"], a[href*="/reel/"], a[href*="/tv/"]');
         const results = [];
         const seen = new Set();
 
         links.forEach(link => {
-            const match = link.href.match(/\/(p|reel)\/([A-Za-z0-9_-]+)/);
-            if (!match || seen.has(match[2])) return;
-            seen.add(match[2]);
+            // More flexible regex to match shortcodes
+            const match = link.href.match(/\/(?:p|reel|tv)\/([A-Za-z0-9_-]{5,})/);
+            if (!match || seen.has(match[1])) return;
+            seen.add(match[1]);
 
-            const shortcode = match[2];
-
-            // Skip if link is outside main scroll area (suggestions sidebar)
+            const shortcode = match[1];
             const rect = link.getBoundingClientRect();
-            if (rect.left > window.innerWidth * 0.7) return; // skip right sidebar
-            if (rect.top < 0) return; // skip header
+
+            // Skip header area
+            if (rect.top < -100) return;
 
             let imageUrl = '';
-            const img = link.querySelector('img') || link.closest('article')?.querySelector('img');
-            if (img) imageUrl = img.src || '';
+            const img = link.querySelector('img');
+            if (img) imageUrl = img.src || img.dataset.src || '';
 
-            const isReel = link.href.includes('/reel/');
+            // Check for video/carousel indicators
+            const isReel = link.href.includes('/reel/') || link.href.includes('/tv/');
+            const hasCarouselIcon = link.querySelector('[aria-label*="Carousel"]') ||
+                                    link.querySelector('[aria-label*="carousel"]') ||
+                                    link.querySelector('.coreSpriteCarousel') ||
+                                    link.closest('article')?.querySelector('[aria-label*="Carousel"]');
 
             results.push({
                 shortcode,
                 image_url: imageUrl,
                 is_video: isReel,
+                is_carousel: !!hasCarouselIcon,
                 top: rect.top + window.scrollY
             });
         });
