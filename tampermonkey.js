@@ -87,28 +87,28 @@
     // ─── Process Posts (in order, stop at target) ─────────────────────
 
     function processPosts(posts) {
-        for (const post of posts) {
-            if (processedShortcodes.has(post.shortcode)) {
-                continue;
+        // If stop shortcode exists, only process posts up to (and including) it
+        let postsToProcess = posts;
+        if (stopShortcode) {
+            const stopIndex = posts.findIndex(p => p.shortcode === stopShortcode);
+            if (stopIndex !== -1) {
+                postsToProcess = posts.slice(0, stopIndex + 1);
             }
+        }
+
+        for (const post of postsToProcess) {
+            if (processedShortcodes.has(post.shortcode)) continue;
 
             processedShortcodes.add(post.shortcode);
+            sendToServer('/api/shortcode', {
+                shortcode: post.shortcode,
+                image_url: post.image_url,
+                is_video: post.is_video
+            });
 
-            // Send to server
-            if (post.caption !== undefined) {
-                sendToServer('/api/posts', post);
-            } else {
-                sendToServer('/api/shortcode', {
-                    shortcode: post.shortcode,
-                    image_url: post.image_url,
-                    is_video: post.is_video
-                });
-            }
-
-            // Check if we reached the stop shortcode
+            // Stop after saving the target post
             if (stopShortcode && post.shortcode === stopShortcode) {
                 log(`Reached stop post: ${stopShortcode}`, 'warn');
-                log(`Total saved: ${postCount}`, 'ok');
                 isExtracting = false;
                 if (scrollInterval) clearInterval(scrollInterval);
                 updateButtons();
