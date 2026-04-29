@@ -7,6 +7,7 @@ import json
 import os
 import re
 import time
+import subprocess
 from pathlib import Path
 from datetime import datetime
 
@@ -70,6 +71,52 @@ def download_file(url, filepath, retries=3):
     return False
 
 
+def fetch_post_info(shortcode):
+    """Fetch post info from Instagram embed endpoint."""
+    try:
+        # Use embed endpoint (doesn't require login for public posts)
+        url = f"https://www.instagram.com/p/{shortcode}/embed/"
+        resp = requests.get(url, timeout=10, headers={
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+        })
+
+        if resp.status_code != 200:
+            return None
+
+        html = resp.text
+
+        # Extract image URL from embed page
+        image_url = ""
+        img_match = re.search(r'class="EmbeddedMediaImage"[^>]+src="([^"]+)"', html)
+        if not img_match:
+            img_match = re.search(r'<img[^>]+src="(https://[^"]*instagram[^"]*\.jpg[^"]*)"', html)
+        if img_match:
+            image_url = img_match.group(1).replace("&amp;", "&")
+
+        # Extract caption
+        caption = ""
+        caption_match = re.search(r'class="Caption"[^>]*>(.*?)</div>', html, re.DOTALL)
+        if caption_match:
+            caption_text = re.sub(r'<[^>]+>', '', caption_match.group(1)).strip()
+            caption = caption_text
+
+        # Try to detect video
+        video_url = ""
+        if 'video-url' in html or 'videoUrl' in html:
+            video_match = re.search(r'"video_url":"([^"]+)"', html)
+            if video_match:
+                video_url = video_match.group(1).replace("\\u0026", "&")
+
+        return {
+            "image_url": image_url,
+            "video_url": video_url,
+            "caption": caption
+        }
+    except Exception as e:
+        print(f"  ✗ Failed to fetch info for {shortcode}: {e}")
+        return None
+
+
 def save_post(post):
     """Download media and save files for a post."""
     shortcode = post.get("shortcode", "")
@@ -92,14 +139,14 @@ def save_post(post):
     if post.get("image_url"):
         image_file = post_dir / f"{prefix}_thumbnail.jpg"
         if not image_file.exists():
-            print(f"  ↓ Downloading image for {shortcode}...")
+            print(f"  ↓ Image: {shortcode}")
             download_file(post["image_url"], image_file)
 
     # Download video
     if post.get("video_url"):
         video_file = post_dir / f"{prefix}.mp4"
         if not video_file.exists():
-            print(f"  ↓ Downloading video for {shortcode}...")
+            print(f"  ↓ Video: {shortcode}")
             download_file(post["video_url"], video_file)
 
     # Save metadata
@@ -121,7 +168,7 @@ def save_post(post):
 
 @app.route("/api/posts", methods=["POST"])
 def receive_post():
-    """Receive a post from the Tampermonkey script."""
+    """Receive a full post from the Tampermonkey script."""
     data = request.json
     if not data or not data.get("shortcode"):
         return jsonify({"error": "Invalid data"}), 400
@@ -138,8 +185,49 @@ def receive_post():
     save_posts(posts)
 
     # Download media
-    print(f"✓ Received: {shortcode} ({data.get('date', 'unknown')})")
+    print(f"✓ {shortcode} ({data.get('date', '?')})")
     save_post(data)
+
+    return jsonify({"status": "ok", "shortcode": shortcode, "total": len(posts)})
+
+
+@app.route("/api/shortcode", methods=["POST"])
+def receive_shortcode():
+    """Receive just a shortcode, fetch details from Instagram."""
+    data = request.json
+    if not data or not data.get("shortcode"):
+        return jsonify({"error": "Invalid data"}), 400
+
+    shortcode = data["shortcode"]
+    dom_image_url = data.get("image_url", "")
+    is_video = data.get("is_video", False)
+
+    # Check for duplicates
+    posts = load_posts()
+    if any(p["shortcode"] == shortcode for p in posts):
+        return jsonify({"status": "duplicate", "shortcode": shortcode})
+
+    # Try to fetch more info
+    info = fetch_post_info(shortcode)
+
+    post = {
+        "shortcode": shortcode,
+        "post_id": shortcode,
+        "caption": info.get("caption", "") if info else "",
+        "image_url": (info.get("image_url", "") if info else "") or dom_image_url,
+        "video_url": info.get("video_url", "") if info else "",
+        "taken_at": 0,
+        "media_type": 2 if is_video else 1,
+        "date": "unknown"
+    }
+
+    # Add to list
+    posts.append(post)
+    save_posts(posts)
+
+    # Download media
+    print(f"✓ {shortcode}")
+    save_post(post)
 
     return jsonify({"status": "ok", "shortcode": shortcode, "total": len(posts)})
 
@@ -166,35 +254,11 @@ def health():
     return jsonify({"status": "ok", "service": "post-extractor-3000"})
 
 
-@app.route("/api/download-all", methods=["GET"])
-def download_all():
-    """Download all clips as a zip."""
-    import io
-    import zipfile
-
-    mp4_files = sorted(OUTPUT_DIR.rglob("*.mp4"))
-    if not mp4_files:
-        return jsonify({"error": "No clips found"}), 404
-
-    memory_file = io.BytesIO()
-    with zipfile.ZipFile(memory_file, 'w', zipfile.ZIP_DEFLATED) as zf:
-        for f in mp4_files:
-            zf.write(f, f.relative_to(OUTPUT_DIR))
-    memory_file.seek(0)
-
-    return send_file(
-        memory_file,
-        mimetype='application/zip',
-        as_attachment=True,
-        download_name='post-extractor-clips.zip'
-    )
-
-
 # ─── Main ───────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     print("=" * 50)
     print("  Post Extractor 3000 — Server")
-    print(f"  Running on http://localhost:{PORT}")
+    print(f"  http://localhost:{PORT}")
     print("=" * 50)
     app.run(host="0.0.0.0", port=PORT, debug=False)
