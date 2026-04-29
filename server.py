@@ -74,38 +74,44 @@ def download_file(url, filepath, retries=3):
 def fetch_post_info(shortcode):
     """Fetch post info from Instagram embed endpoint."""
     try:
-        # Use embed endpoint (doesn't require login for public posts)
         url = f"https://www.instagram.com/p/{shortcode}/embed/"
         resp = requests.get(url, timeout=10, headers={
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
         })
 
         if resp.status_code != 200:
+            print(f"  ✗ Embed returned {resp.status_code} for {shortcode}")
             return None
 
         html = resp.text
 
-        # Extract image URL from embed page
+        # Extract image URL - look for EmbeddedMediaImage class
         image_url = ""
-        img_match = re.search(r'class="EmbeddedMediaImage"[^>]+src="([^"]+)"', html)
-        if not img_match:
-            img_match = re.search(r'<img[^>]+src="(https://[^"]*instagram[^"]*\.jpg[^"]*)"', html)
+        img_match = re.search(r'class="EmbeddedMediaImage"[^>]*\bsrc="([^"]+)"', html)
         if img_match:
             image_url = img_match.group(1).replace("&amp;", "&")
-
-        # Extract caption
-        caption = ""
-        caption_match = re.search(r'class="Caption"[^>]*>(.*?)</div>', html, re.DOTALL)
-        if caption_match:
-            caption_text = re.sub(r'<[^>]+>', '', caption_match.group(1)).strip()
-            caption = caption_text
+        else:
+            # Fallback: look for any instagram CDN image that's not a profile pic
+            all_imgs = re.findall(r'src="(https://[^"]*\.fbcdn\.net[^"]*\.jpg[^"]*)"', html)
+            for img in all_imgs:
+                if 's150x150' not in img and 'profile' not in img:
+                    image_url = img.replace("&amp;", "&")
+                    break
 
         # Try to detect video
         video_url = ""
-        if 'video-url' in html or 'videoUrl' in html:
-            video_match = re.search(r'"video_url":"([^"]+)"', html)
+        video_match = re.search(r'"video_url":"([^"]+)"', html)
+        if video_match:
+            video_url = video_match.group(1).replace("\\u0026", "&")
+        else:
+            video_match = re.search(r'video_versions.*?"url":"([^"]+)"', html)
             if video_match:
                 video_url = video_match.group(1).replace("\\u0026", "&")
+
+        # Caption is not available in embed page for most posts
+        caption = ""
+
+        print(f"  → {shortcode}: img={'yes' if image_url else 'no'}, vid={'yes' if video_url else 'no'}")
 
         return {
             "image_url": image_url,
