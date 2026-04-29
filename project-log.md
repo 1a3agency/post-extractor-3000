@@ -4,6 +4,11 @@
 
 ## How to Run
 
+```bash
+cd post-extractor-3000
+python3 scraper.py
+```
+
 **First time setup:**
 ```bash
 cd post-extractor-3000
@@ -11,53 +16,9 @@ pip install -r requirements.txt
 playwright install chromium
 ```
 
-**Run the scraper:**
-```bash
-cd post-extractor-3000
-python3 scraper.py
-```
-
 **Before running:**
 - Close all Chrome windows (the script launches Chrome with your profile)
-- Edit `TARGET_PROFILE` in `scraper.py` to set the Instagram URL
-
----
-
-## What It Does
-
-Scrapes an Instagram profile by intercepting network requests (not DOM scraping).
-
-1. Launches Chrome with your existing login session
-2. Navigates to the target Instagram profile
-3. Scrolls and intercepts GraphQL/API responses
-4. Extracts post data (shortcode, caption, image URL, video URL)
-5. Downloads media into organized folders
-
-**Output structure:**
-```
-ig_archive/
-├── post_ABC123/
-│   ├── post_ABC123_caption.txt
-│   ├── post_ABC123_thumbnail.jpg
-│   ├── post_ABC123.mp4          (if video)
-│   └── post_ABC123_meta.json
-├── post_XYZ789/
-│   └── ...
-```
-
----
-
-## Configuration
-
-Edit these values at the top of `scraper.py`:
-
-| Variable | Default | Description |
-|---|---|---|
-| `TARGET_PROFILE` | `https://www.instagram.com/antigravityco/` | Profile URL to scrape |
-| `MAX_POSTS` | `0` | Max posts to extract (0 = unlimited) |
-| `MAX_SCROLLS` | `100` | Max scroll attempts (safety limit) |
-| `SCROLL_DELAY_MIN` | `2` | Min delay between scrolls (seconds) |
-| `SCROLL_DELAY_MAX` | `5` | Max delay between scrolls (seconds) |
+- Edit `TARGET_PROFILE` at the top of `scraper.py`
 
 ---
 
@@ -65,8 +26,8 @@ Edit these values at the top of `scraper.py`:
 
 **2026-04-28 — Initial Creation**
 - Created scraper.py with Playwright network interception
-- No DOM scraping — relies on intercepting GraphQL/API responses
-- Human-like scrolling with random delays
+- No DOM scraping — intercepts GraphQL/API responses instead
+- Human-like scrolling with random 2-5s delays
 - Downloads images, videos, and captions
 - Organized output in `post_[shortcode]` folders
 
@@ -76,29 +37,50 @@ Edit these values at the top of `scraper.py`:
 
 ```
 post-extractor-3000/
-├── scraper.py           # Main script
+├── scraper.py           # Main script (config at top)
 ├── requirements.txt     # Python dependencies
 ├── .gitignore
 ├── project-log.md       # This file
 └── ig_archive/          # Downloaded posts (gitignored)
+    └── post_[shortcode]/
+        ├── post_[shortcode]_caption.txt
+        ├── post_[shortcode]_thumbnail.jpg
+        ├── post_[shortcode].mp4        (if video)
+        └── post_[shortcode]_meta.json
 ```
+
+**Config (top of scraper.py):**
+- `TARGET_PROFILE` — Instagram URL to scrape
+- `MAX_POSTS` — Limit posts (0 = unlimited)
+- `MAX_SCROLLS` — Max scroll attempts (default 100)
+- `SCROLL_DELAY_MIN/MAX` — Delay between scrolls (2-5s)
 
 ---
 
-## How It Works
+## Features
 
-1. **Network Interception** — Listens for Instagram's API responses instead of parsing HTML
-2. **GraphQL Parsing** — Extracts shortcode, caption, image URLs, video URLs from JSON
-3. **Persistent Context** — Uses Chrome's user data directory for existing login session
-4. **Duplicate Prevention** — Tracks processed shortcodes in a set
-5. **Error Handling** — Retries failed downloads, skips broken links
+- Network interception (no DOM scraping, survives class changes)
+- Uses existing Chrome login session (persistent context)
+- Extracts shortcode, caption, image URL, video URL
+- Downloads media to organized folder structure
+- Duplicate prevention via processed shortcodes set
+- Error handling with 3x retry on failed downloads
+
+---
+
+## Technical Notes
+
+- Intercepts `/api/v1/feed/` and `/graphql/query` responses
+- Parses Instagram's internal JSON structure for media nodes
+- Walks nested objects to find `shortcode` + `image_versions2` or `video_versions`
+- Chrome user data: `~/Library/Application Support/Google/Chrome`
 
 ---
 
 ## Dependencies
 
 - **Python:** playwright, requests
-- **Browser:** Chromium (installed via `playwright install chromium`)
+- **Browser:** Chromium (via `playwright install chromium`)
 
 ---
 
@@ -106,4 +88,4 @@ post-extractor-3000/
 
 - **"Chrome is already running"** — Close all Chrome windows before running
 - **No posts found** — Make sure you're logged into Instagram in Chrome
-- **Downloads fail** — Check your internet connection; script retries 3 times
+- **Downloads fail** — Check internet connection; script retries 3 times
