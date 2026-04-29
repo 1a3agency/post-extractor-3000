@@ -1,11 +1,14 @@
 // ==UserScript==
 // @name         Post Extractor 3000
 // @namespace    http://tampermonkey.net/
-// @version      8.0
-// @description  Extract Instagram posts (count-based)
+// @version      9.0
+// @description  Extract Instagram posts with captions and videos
 // @match        https://www.instagram.com/*
 // @grant        GM_xmlhttpRequest
 // @connect      localhost
+// @connect      instagram.com
+// @connect      cdninstagram.com
+// @connect      fbcdn.net
 // @run-at       document-start
 // ==/UserScript==
 
@@ -24,6 +27,8 @@
         const styles = { info: 'color: #a855f7', ok: 'color: #22c55e', warn: 'color: #eab308', err: 'color: #ef4444' };
         console.log(`%c[PE3000] ${msg}`, styles[level] || styles.info);
     }
+
+    // ─── Extract post links from DOM ──────────────────────────────────
 
     function extractPosts() {
         const links = document.querySelectorAll('a[href*="/p/"], a[href*="/reel/"]');
@@ -55,21 +60,122 @@
         return found;
     }
 
+    // ─── Fetch post details from Instagram (with your session) ────────
+
+    function fetchPostDetails(shortcode) {
+        return new Promise((resolve) => {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: `https://www.instagram.com/p/${shortcode}/`,
+                onload: function(resp) {
+                    const html = resp.responseText;
+                    let caption = '';
+                    let imageUrl = '';
+                    let videoUrl = '';
+
+                    try {
+                        // Look for shared data with post info
+                        const sharedDataMatch = html.match(/window\._sharedData\s*=\s*({.+?});<\/script>/);
+                        if (sharedDataMatch) {
+                            const data = JSON.parse(sharedDataMatch[1]);
+                            const media = findMediaInObject(data);
+                            if (media) {
+                                caption = media.caption?.text || '';
+                                imageUrl = media.image_versions2?.candidates?.[0]?.url || media.display_url || '';
+                                if (media.video_versions?.length) {
+                                    videoUrl = media.video_versions[0].url;
+                                }
+                            }
+                        }
+
+                        // Fallback: look for additional data
+                        if (!caption || !imageUrl) {
+                            const addDataMatch = html.match(/window\.__additionalDataLoaded\('[^']+',\s*({.+?})\)/);
+                            if (addDataMatch) {
+                                const data = JSON.parse(addDataMatch[1]);
+                                const media = findMediaInObject(data);
+                                if (media) {
+                                    if (!caption) caption = media.caption?.text || '';
+                                    if (!imageUrl) imageUrl = media.image_versions2?.candidates?.[0]?.url || media.display_url || '';
+                                    if (!videoUrl && media.video_versions?.length) {
+                                        videoUrl = media.video_versions[0].url;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Fallback: look for JSON in script tags
+                        if (!caption || !imageUrl) {
+                            const scriptTags = html.match(/<script type="application\/json"[^>]*>(.+?)<\/script>/g);
+                            if (scriptTags) {
+                                for (const tag of scriptTags) {
+                                    const jsonMatch = tag.match(/>(.+?)<\/script>/);
+                                    if (jsonMatch) {
+                                        try {
+                                            const data = JSON.parse(jsonMatch[1]);
+                                            const media = findMediaInObject(data);
+                                            if (media) {
+                                                if (!caption) caption = media.caption?.text || '';
+                                                if (!imageUrl) imageUrl = media.image_versions2?.candidates?.[0]?.url || media.display_url || '';
+                                                if (!videoUrl && media.video_versions?.length) {
+                                                    videoUrl = media.video_versions[0].url;
+                                                }
+                                                break;
+                                            }
+                                        } catch (e) {}
+                                    }
+                                }
+                            }
+                        }
+
+                    } catch (e) {
+                        log(`Parse error for ${shortcode}: ${e.message}`, 'err');
+                    }
+
+                    resolve({ caption, imageUrl, videoUrl });
+                },
+                onerror: function() {
+                    resolve({ caption: '', imageUrl: '', videoUrl: '' });
+                }
+            });
+        });
+    }
+
+    function findMediaInObject(obj, depth = 0) {
+        if (!obj || typeof obj !== 'object' || depth > 15) return null;
+
+        if (obj.shortcode && (obj.image_versions2 || obj.video_versions || obj.display_url)) {
+            return obj;
+        }
+
+        if (Array.isArray(obj)) {
+            for (const item of obj) {
+                const found = findMediaInObject(item, depth + 1);
+                if (found) return found;
+            }
+        } else {
+            for (const key of Object.keys(obj)) {
+                const found = findMediaInObject(obj[key], depth + 1);
+                if (found) return found;
+            }
+        }
+
+        return null;
+    }
+
+    // ─── Send to server ───────────────────────────────────────────────
+
     function sendToServer(post, callback) {
         GM_xmlhttpRequest({
             method: 'POST',
-            url: `${API_SERVER}/api/shortcode`,
+            url: `${API_SERVER}/api/full`,
             headers: { 'Content-Type': 'application/json' },
-            data: JSON.stringify({
-                shortcode: post.shortcode,
-                image_url: post.image_url,
-                is_video: post.is_video
-            }),
+            data: JSON.stringify(post),
             onload: function(resp) {
                 if (resp.status === 200) {
                     savedCount++;
                     updateUI();
-                    log(`Saved: ${post.shortcode} (${savedCount}/${maxPosts})`, 'ok');
+                    log(`Saved: ${post.shortcode} (${savedCount}/${maxPosts}) caption=${post.caption ? 'yes' : 'no'} video=${post.video_url ? 'yes' : 'no'}`, 'ok');
                 }
                 if (callback) callback();
             },
@@ -80,7 +186,9 @@
         });
     }
 
-    function processQueue() {
+    // ─── Queue processing ─────────────────────────────────────────────
+
+    async function processQueue() {
         if (!isExtracting || savedCount >= maxPosts || queue.length === 0) {
             if (savedCount >= maxPosts && isExtracting) {
                 log(`Done! Saved ${savedCount} posts.`, 'ok');
@@ -98,12 +206,23 @@
         }
 
         processedShortcodes.add(post.shortcode);
+
+        // Fetch full details from Instagram
+        log(`Fetching: ${post.shortcode}...`, 'info');
+        const details = await fetchPostDetails(post.shortcode);
+
+        post.caption = details.caption || '';
+        post.image_url = details.imageUrl || post.image_url;
+        post.video_url = details.videoUrl || '';
+
         sendToServer(post, () => {
             if (isExtracting && savedCount < maxPosts) {
-                setTimeout(processQueue, 200);
+                setTimeout(processQueue, 500);
             }
         });
     }
+
+    // ─── UI ───────────────────────────────────────────────────────────
 
     function createUI() {
         const panel = document.createElement('div');

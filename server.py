@@ -238,6 +238,41 @@ def receive_shortcode():
     return jsonify({"status": "ok", "shortcode": shortcode, "total": len(posts)})
 
 
+@app.route("/api/full", methods=["POST"])
+def receive_full():
+    """Receive full post data from Tampermonkey (with caption, video, etc)."""
+    data = request.json
+    if not data or not data.get("shortcode"):
+        return jsonify({"error": "Invalid data"}), 400
+
+    shortcode = data["shortcode"]
+
+    posts = load_posts()
+    if any(p["shortcode"] == shortcode for p in posts):
+        return jsonify({"status": "duplicate", "shortcode": shortcode})
+
+    post = {
+        "shortcode": shortcode,
+        "post_id": shortcode,
+        "caption": data.get("caption", ""),
+        "image_url": data.get("image_url", ""),
+        "video_url": data.get("video_url", ""),
+        "taken_at": 0,
+        "media_type": 2 if data.get("video_url") else 1,
+        "date": "unknown"
+    }
+
+    posts.append(post)
+    save_posts(posts)
+
+    has_caption = "✓" if post["caption"] else "✗"
+    has_video = "✓" if post["video_url"] else "✗"
+    print(f"✓ {shortcode} caption={has_caption} video={has_video}")
+    save_post(post)
+
+    return jsonify({"status": "ok", "shortcode": shortcode, "total": len(posts)})
+
+
 @app.route("/api/posts", methods=["GET"])
 def get_posts():
     """Get all extracted posts."""
