@@ -22,6 +22,7 @@
     let scrollInterval = null;
     const processedShortcodes = new Set();
     const queue = [];
+    const allLinks = new Set();
 
     function log(msg, level = 'info') {
         const styles = { info: 'color: #a855f7', ok: 'color: #22c55e', warn: 'color: #eab308', err: 'color: #ef4444' };
@@ -43,6 +44,10 @@
             const shortcode = match[1];
             const rect = link.getBoundingClientRect();
             if (rect.top < -50) return;
+
+            // Save full link
+            const fullUrl = `https://www.instagram.com/p/${shortcode}/`;
+            allLinks.add(fullUrl);
 
             let imageUrl = '';
             const img = link.querySelector('img');
@@ -312,6 +317,22 @@
         if (scrollInterval) clearInterval(scrollInterval);
         updateButtons();
         log(`Stopped. Saved ${savedCount} posts.`, 'warn');
+
+        // Save links to file
+        saveLinks();
+    }
+
+    function saveLinks() {
+        const links = Array.from(allLinks).join('\n');
+        GM_xmlhttpRequest({
+            method: 'POST',
+            url: `${API_SERVER}/api/links`,
+            headers: { 'Content-Type': 'application/json' },
+            data: JSON.stringify({ links: Array.from(allLinks) }),
+            onload: function() {
+                log(`Saved ${allLinks.size} links to file`, 'ok');
+            }
+        });
     }
 
     if (document.readyState === 'loading') {

@@ -295,6 +295,21 @@ def health():
     return jsonify({"status": "ok", "service": "post-extractor-3000"})
 
 
+@app.route("/api/links", methods=["POST"])
+def save_links():
+    """Save post links to a text file."""
+    data = request.json
+    if not data or not data.get("links"):
+        return jsonify({"error": "No links provided"}), 400
+
+    links_file = Path(__file__).parent / "post_links.txt"
+    with open(links_file, "w", encoding="utf-8") as f:
+        f.write("\n".join(data["links"]))
+
+    print(f"✓ Saved {len(data['links'])} links to post_links.txt")
+    return jsonify({"status": "ok", "count": len(data["links"])})
+
+
 # ─── Main ───────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
